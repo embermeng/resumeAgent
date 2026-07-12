@@ -1,0 +1,42 @@
+# Agent编排
+langgraph>=0.2.0
+langchain>=0.3.0
+langchain-community>=0.3.0
+
+# 向量数据库
+faiss-cpu>=1.9.0
+
+# LLM API
+dashscope>=1.20.0
+openai>=1.51.0
+
+# Web UI
+streamlit>=1.38.0
+
+# 检索
+rank-bm25>=0.2.2
+
+# 数据模型
+pydantic>=2.9.0
+
+# 环境变量
+python-dotenv>=1.0.1
+
+# Token计数
+tiktoken>=0.8.0
+
+# PDF解析
+PyPDF2>=3.0.1
+
+# 工具
+click>=8.1.7
+tqdm>=4.66.5
+pyprojroot>=0.3.0
+pandas>=2.2.3
+httpx>=0.27.2
+json_repair>=0.35.0
+tenacity>=8.0.0
+
+# 测试
+pytest>=8.0.0
+pytest-asyncio>=0.23.0

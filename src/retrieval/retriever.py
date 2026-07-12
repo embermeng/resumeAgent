@@ -1,0 +1,270 @@
+"""
+检索器模块
+支持向量检索、BM25检索、混合检索三种模式
+参考 RAG-cy/src/retrieval.py 适配（去掉按公司名检索，改为按知识类型检索）
+"""
+import json
+import pickle
+import logging
+from pathlib import Path
+from typing import List, Dict, Optional
+
+import numpy as np
+import faiss
+
+from src.config import get_config
+
+_log = logging.getLogger(__name__)
+
+
+class BM25Retriever:
+    """BM25检索器"""
+
+    def __init__(self, bm25_db_dir: Path, documents_dir: Path):
+        self.bm25_db_dir = bm25_db_dir
+        self.documents_dir = documents_dir
+
+    def _load_document(self, doc_id: str) -> dict:
+        """加载指定doc_id的分块文档"""
+        doc_path = self.documents_dir / f"{doc_id}.json"
+        if not doc_path.exists():
+            raise ValueError(f"文档不存在: {doc_path}")
+        with open(doc_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+
+    def _load_bm25_index(self, doc_id: str):
+        """加载指定doc_id的BM25索引"""
+        index_path = self.bm25_db_dir / f"{doc_id}.pkl"
+        if not index_path.exists():
+            raise ValueError(f"BM25索引不存在: {index_path}")
+        with open(index_path, "rb") as f:
+            return pickle.load(f)
+
+    def retrieve(
+        self,
+        query: str,
+        doc_id: str = None,
+        category: str = None,
+        top_n: int = 5,
+    ) -> List[Dict]:
+        """
+        检索文本块
+        参数:
+            query: 查询文本
+            doc_id: 指定文档ID（可选）
+            category: 按类别过滤 (course/project/interview)
+            top_n: 返回结果数
+        返回:
+            [{"text": str, "score": float, "source": str, "doc_id": str}, ...]
+        """
+        results = []
+
+        # 确定要检索的文档
+        if doc_id:
+            doc_ids = [doc_id]
+        else:
+            doc_ids = self._find_doc_ids(category)
+
+        for did in doc_ids:
+            try:
+                document = self._load_document(did)
+                bm25_index = self._load_bm25_index(did)
+            except ValueError:
+                continue
+
+            chunks = document["content"]["chunks"]
+            tokenized_query = query.split()
+            scores = bm25_index.get_scores(tokenized_query)
+
+            actual_top_n = min(top_n, len(scores))
+            top_indices = sorted(
+                range(len(scores)), key=lambda i: scores[i], reverse=True
+            )[:actual_top_n]
+
+            for idx in top_indices:
+                results.append({
+                    "text": chunks[idx]["text"],
+                    "score": round(float(scores[idx]), 4),
+                    "source": document["metainfo"].get("source", ""),
+                    "doc_id": did,
+                    "chunk_id": idx,
+                })
+
+        # 全局排序取top_n
+        results.sort(key=lambda x: x["score"], reverse=True)
+        return results[:top_n]
+
+    def _find_doc_ids(self, category: str = None) -> List[str]:
+        """根据类别查找文档ID"""
+        doc_ids = []
+        for path in self.documents_dir.glob("*.json"):
+            if category:
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        doc = json.load(f)
+                    if doc["metainfo"].get("category") == category:
+                        doc_ids.append(path.stem)
+                except Exception:
+                    continue
+            else:
+                doc_ids.append(path.stem)
+        return doc_ids
+
+
+class VectorRetriever:
+    """向量检索器"""
+
+    def __init__(
+        self,
+        vector_db_dir: Path,
+        documents_dir: Path,
+        embedding_provider: str = "dashscope",
+        embedding_model: str = "text-embedding-v1",
+    ):
+        self.vector_db_dir = vector_db_dir
+        self.documents_dir = documents_dir
+        self.embedding_provider = embedding_provider
+        self.embedding_model = embedding_model
+        self.all_dbs = self._load_dbs()
+
+    def _load_dbs(self) -> List[Dict]:
+        """加载所有向量库和文档映射"""
+        all_dbs = []
+        for doc_path in self.documents_dir.glob("*.json"):
+            try:
+                with open(doc_path, "r", encoding="utf-8") as f:
+                    document = json.load(f)
+            except Exception as e:
+                _log.error(f"加载文档失败 {doc_path.name}: {e}")
+                continue
+
+            doc_id = document.get("metainfo", {}).get("doc_id", doc_path.stem)
+            faiss_path = self.vector_db_dir / f"{doc_id}.faiss"
+            if not faiss_path.exists():
+                _log.warning(f"向量库不存在: {faiss_path.name}")
+                continue
+
+            try:
+                vector_db = faiss.read_index(str(faiss_path))
+            except Exception as e:
+                _log.error(f"加载向量库失败 {faiss_path.name}: {e}")
+                continue
+
+            all_dbs.append({
+                "doc_id": doc_id,
+                "vector_db": vector_db,
+                "document": document,
+            })
+        return all_dbs
+
+    def _get_embedding(self, text: str) -> List[float]:
+        """获取文本embedding"""
+        from src.api_client import APIProcessor
+        api = APIProcessor(provider=self.embedding_provider)
+        return api.get_embedding(text, provider=self.embedding_provider, model=self.embedding_model)
+
+    def retrieve(
+        self,
+        query: str,
+        category: str = None,
+        top_n: int = 5,
+    ) -> List[Dict]:
+        """
+        向量检索
+        参数:
+            query: 查询文本
+            category: 按类别过滤
+            top_n: 返回结果数
+        返回:
+            [{"text": str, "distance": float, "source": str, "doc_id": str}, ...]
+        """
+        embedding = self._get_embedding(query)
+        embedding_array = np.array(embedding, dtype=np.float32).reshape(1, -1)
+
+        all_results = []
+        for db_info in self.all_dbs:
+            document = db_info["document"]
+            # 类别过滤
+            if category and document["metainfo"].get("category") != category:
+                continue
+
+            vector_db = db_info["vector_db"]
+            chunks = document["content"]["chunks"]
+            actual_top_n = min(top_n, len(chunks))
+
+            if actual_top_n == 0:
+                continue
+
+            distances, indices = vector_db.search(x=embedding_array, k=actual_top_n)
+
+            for distance, index in zip(distances[0], indices[0]):
+                all_results.append({
+                    "text": chunks[index]["text"],
+                    "distance": round(float(distance), 4),
+                    "source": document["metainfo"].get("source", ""),
+                    "doc_id": db_info["doc_id"],
+                    "chunk_id": index,
+                })
+
+        # 按distance降序排序
+        all_results.sort(key=lambda x: x["distance"], reverse=True)
+        return all_results[:top_n]
+
+
+class HybridRetriever:
+    """混合检索器：结合向量和BM25"""
+
+    def __init__(
+        self,
+        vector_db_dir: Path,
+        bm25_db_dir: Path,
+        documents_dir: Path,
+        embedding_provider: str = "dashscope",
+        embedding_model: str = "text-embedding-v1",
+    ):
+        self.vector_retriever = VectorRetriever(
+            vector_db_dir, documents_dir, embedding_provider, embedding_model
+        )
+        self.bm25_retriever = BM25Retriever(bm25_db_dir, documents_dir)
+
+    def retrieve(
+        self,
+        query: str,
+        category: str = None,
+        top_n: int = 5,
+        vector_weight: float = 0.6,
+    ) -> List[Dict]:
+        """
+        混合检索：合并向量和BM25结果
+        """
+        vector_results = self.vector_retriever.retrieve(query, category, top_n=top_n * 2)
+        bm25_results = self.bm25_retriever.retrieve(query, category=category, top_n=top_n * 2)
+
+        # 合并结果（简单加权）
+        merged = {}
+        for r in vector_results:
+            key = (r["doc_id"], r["chunk_id"])
+            merged[key] = {
+                "text": r["text"],
+                "source": r["source"],
+                "doc_id": r["doc_id"],
+                "chunk_id": r["chunk_id"],
+                "score": vector_weight * r["distance"],
+            }
+
+        bm25_weight = 1 - vector_weight
+        for r in bm25_results:
+            key = (r["doc_id"], r["chunk_id"])
+            if key in merged:
+                merged[key]["score"] += bm25_weight * r["score"]
+            else:
+                merged[key] = {
+                    "text": r["text"],
+                    "source": r["source"],
+                    "doc_id": r["doc_id"],
+                    "chunk_id": r["chunk_id"],
+                    "score": bm25_weight * r["score"],
+                }
+
+        results = sorted(merged.values(), key=lambda x: x["score"], reverse=True)
+        return results[:top_n]
