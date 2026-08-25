@@ -1,9 +1,11 @@
 """
 向量化入库模块
 支持FAISS向量索引和BM25索引双通道
+增量构建：默认跳过已存在且未过期的索引，force全量重建，prune清理孤儿索引
 参考 RAG-cy/src/ingestion.py 适配（去掉sha1/company_name依赖）
 """
 import json
+import os
 import pickle
 import logging
 from pathlib import Path
@@ -15,7 +17,18 @@ from rank_bm25 import BM25Okapi
 import faiss
 from tenacity import retry, wait_fixed, stop_after_attempt
 
+from src.knowledge.tokenizer import tokenize
+
 _log = logging.getLogger(__name__)
+
+
+def _need_rebuild(chunk_path: Path, index_path: Path, force: bool) -> bool:
+    """判断是否需要重建索引：force / 索引不存在 / 分块文件比索引新（上游更新过）"""
+    if force:
+        return True
+    if not index_path.exists():
+        return True
+    return chunk_path.stat().st_mtime > index_path.stat().st_mtime
 
 
 class BM25Ingestor:
@@ -23,22 +36,45 @@ class BM25Ingestor:
 
     def create_bm25_index(self, chunks: List[str]) -> BM25Okapi:
         """从文本块列表创建BM25索引"""
-        tokenized_chunks = [chunk.split() for chunk in chunks]
+        # 必须与查询侧使用同一分词器（jieba），中文无空格不能用split()
+        tokenized_chunks = [tokenize(chunk) for chunk in chunks]
         return BM25Okapi(tokenized_chunks)
 
-    def process_chunks_dir(self, chunks_dir: Path, output_dir: Path):
+    def process_chunks_dir(
+        self,
+        chunks_dir: Path,
+        output_dir: Path,
+        force: bool = False,
+        prune: bool = False,
+    ):
         """
         批量处理所有分块JSON文件，生成并保存BM25索引
+        增量构建：默认跳过已存在且未过期的索引
         参数:
             chunks_dir: 存放分块JSON文件的目录
             output_dir: 保存BM25索引(.pkl)的目录
+            force: 强制全量重建
+            prune: 清理doc_id在分块目录中已不存在的孤儿索引
         """
         output_dir.mkdir(parents=True, exist_ok=True)
         chunk_paths = list(chunks_dir.glob("*.json"))
 
+        skipped = 0
+        built = 0
+        valid_doc_ids = set()
         for chunk_path in tqdm(chunk_paths, desc="Building BM25 indexes"):
             with open(chunk_path, "r", encoding="utf-8") as f:
                 doc_data = json.load(f)
+
+            # 用doc_id作为文件名
+            doc_id = doc_data["metainfo"].get("doc_id", chunk_path.stem)
+            valid_doc_ids.add(doc_id)
+            output_file = output_dir / f"{doc_id}.pkl"
+
+            if not _need_rebuild(chunk_path, output_file, force):
+                _log.info(f"跳过已有BM25索引: {doc_id}")
+                skipped += 1
+                continue
 
             text_chunks = [c["text"] for c in doc_data["content"]["chunks"]]
             if not text_chunks:
@@ -47,13 +83,28 @@ class BM25Ingestor:
 
             bm25_index = self.create_bm25_index(text_chunks)
 
-            # 用doc_id作为文件名
-            doc_id = doc_data["metainfo"].get("doc_id", chunk_path.stem)
-            output_file = output_dir / f"{doc_id}.pkl"
-            with open(output_file, "wb") as f:
+            # 原子写入：先写临时文件再替换，避免中断留下半截索引
+            tmp_file = output_file.with_suffix(".pkl.tmp")
+            with open(tmp_file, "wb") as f:
                 pickle.dump(bm25_index, f)
+            os.replace(tmp_file, output_file)
+            built += 1
 
-        _log.info(f"BM25索引构建完成，共处理 {len(chunk_paths)} 个文档")
+        if prune:
+            self._prune_orphan_indexes(output_dir, valid_doc_ids)
+
+        _log.info(
+            f"BM25索引构建完成，共 {len(chunk_paths)} 个文档，"
+            f"跳过 {skipped} 个，新建/重建 {built} 个"
+        )
+
+    @staticmethod
+    def _prune_orphan_indexes(output_dir: Path, valid_doc_ids: set):
+        """删除doc_id在上游已不存在的孤儿索引文件"""
+        for index_file in output_dir.glob("*.pkl"):
+            if index_file.stem not in valid_doc_ids:
+                index_file.unlink()
+                _log.warning(f"已清理孤儿BM25索引: {index_file.name}")
 
     def process_single(self, doc_data: dict, output_dir: Path) -> Path:
         """
@@ -155,16 +206,40 @@ class VectorDBIngestor:
         embeddings = self._get_embeddings(text_chunks)
         return self._create_vector_db(embeddings)
 
-    def process_chunks_dir(self, chunks_dir: Path, output_dir: Path):
+    def process_chunks_dir(
+        self,
+        chunks_dir: Path,
+        output_dir: Path,
+        force: bool = False,
+        prune: bool = False,
+    ):
         """
         批量处理所有分块JSON文件，生成并保存FAISS向量索引
+        增量构建：默认跳过已存在且未过期的索引（节省embedding API调用）
+        参数:
+            chunks_dir: 存放分块JSON文件的目录
+            output_dir: 保存FAISS索引(.faiss)的目录
+            force: 强制全量重建
+            prune: 清理doc_id在分块目录中已不存在的孤儿索引
         """
         output_dir.mkdir(parents=True, exist_ok=True)
         chunk_paths = list(chunks_dir.glob("*.json"))
 
+        skipped = 0
+        built = 0
+        valid_doc_ids = set()
         for chunk_path in tqdm(chunk_paths, desc="Building FAISS indexes"):
             with open(chunk_path, "r", encoding="utf-8") as f:
                 doc_data = json.load(f)
+
+            doc_id = doc_data["metainfo"].get("doc_id", chunk_path.stem)
+            valid_doc_ids.add(doc_id)
+            faiss_path = output_dir / f"{doc_id}.faiss"
+
+            if not _need_rebuild(chunk_path, faiss_path, force):
+                _log.info(f"跳过已有FAISS索引: {doc_id}")
+                skipped += 1
+                continue
 
             try:
                 index = self._process_document(doc_data)
@@ -172,11 +247,39 @@ class VectorDBIngestor:
                 _log.error(f"处理文档失败 {chunk_path.name}: {e}")
                 continue
 
-            doc_id = doc_data["metainfo"].get("doc_id", chunk_path.stem)
-            faiss_path = output_dir / f"{doc_id}.faiss"
-            faiss.write_index(index, str(faiss_path))
+            # FAISS C++ fopen不支持中文路径，先写临时文件再移动
+            import tempfile, shutil
+            with tempfile.NamedTemporaryFile(suffix=".faiss", delete=False) as tmp:
+                tmp_path = tmp.name
+            try:
+                faiss.write_index(index, tmp_path)
+                shutil.move(tmp_path, str(faiss_path))
+            except Exception:
+                # 如果临时文件方式也失败，尝试直接写入（路径无中文时可能成功）
+                try:
+                    faiss.write_index(index, str(faiss_path))
+                except RuntimeError:
+                    raise
+            finally:
+                if Path(tmp_path).exists():
+                    Path(tmp_path).unlink(missing_ok=True)
+            built += 1
 
-        _log.info(f"FAISS索引构建完成，共处理 {len(chunk_paths)} 个文档")
+        if prune:
+            self._prune_orphan_indexes(output_dir, valid_doc_ids)
+
+        _log.info(
+            f"FAISS索引构建完成，共 {len(chunk_paths)} 个文档，"
+            f"跳过 {skipped} 个，新建/重建 {built} 个"
+        )
+
+    @staticmethod
+    def _prune_orphan_indexes(output_dir: Path, valid_doc_ids: set):
+        """删除doc_id在上游已不存在的孤儿索引文件"""
+        for index_file in output_dir.glob("*.faiss"):
+            if index_file.stem not in valid_doc_ids:
+                index_file.unlink()
+                _log.warning(f"已清理孤儿FAISS索引: {index_file.name}")
 
     def process_single(self, doc_data: dict, output_dir: Path) -> Path:
         """
@@ -188,5 +291,19 @@ class VectorDBIngestor:
 
         doc_id = doc_data["metainfo"].get("doc_id", "unknown")
         faiss_path = output_dir / f"{doc_id}.faiss"
-        faiss.write_index(index, str(faiss_path))
+        # FAISS C++ fopen不支持中文路径，先写临时文件再移动
+        import tempfile, shutil
+        with tempfile.NamedTemporaryFile(suffix=".faiss", delete=False) as tmp:
+            tmp_path = tmp.name
+        try:
+            faiss.write_index(index, tmp_path)
+            shutil.move(tmp_path, str(faiss_path))
+        except Exception:
+            try:
+                faiss.write_index(index, str(faiss_path))
+            except RuntimeError:
+                raise
+        finally:
+            if Path(tmp_path).exists():
+                Path(tmp_path).unlink(missing_ok=True)
         return faiss_path

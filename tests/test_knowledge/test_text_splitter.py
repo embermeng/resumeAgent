@@ -65,6 +65,17 @@ class TestSplitText:
         chunks = splitter.split_text("", chunk_size=50, chunk_overlap=10)
         assert chunks == []
 
+    def test_split_text_with_special_tokens(self, splitter):
+        """文本中包含特殊token字面量（如课件中的tokenizer示例）不应报错"""
+        text = "GPT-2的结束token是<|endoftext|>，填充token是<|padding|>。" * 100
+        chunks = splitter.split_text(text, chunk_size=50, chunk_overlap=10)
+        assert len(chunks) > 0
+
+    def test_count_tokens_with_special_tokens(self, splitter):
+        """count_tokens遇到特殊token字面量不报错"""
+        tokens = splitter.count_tokens("示例<|endoftext|>文本")
+        assert tokens > 0
+
 
 class TestSplitMarkdownFile:
     def test_split_markdown_file(self, splitter, sample_md_file):
@@ -107,6 +118,42 @@ class TestSplitAndSave:
 
         splitter.split_and_save(input_dir, output_dir)
         assert len(list(output_dir.glob("*.json"))) == 0
+
+    def test_split_and_save_incremental_skip(self, splitter, tmp_path):
+        """增量分块：已存在结果的文档被跳过"""
+        input_dir = tmp_path / "input"
+        output_dir = tmp_path / "output"
+        input_dir.mkdir()
+        output_dir.mkdir()
+        (input_dir / "test1.md").write_text("# 测试1\n\n内容A" * 50, encoding="utf-8")
+
+        # 第一次全量分块
+        splitter.split_and_save(input_dir, output_dir, chunk_size=50)
+        json_file = list(output_dir.glob("*.json"))[0]
+        first_mtime = json_file.stat().st_mtime
+
+        # 新增一个md文件后第二次运行：test1应被跳过，只分块test2
+        (input_dir / "test2.md").write_text("# 测试2\n\n内容B" * 50, encoding="utf-8")
+        splitter.split_and_save(input_dir, output_dir, chunk_size=50)
+
+        assert len(list(output_dir.glob("*.json"))) == 2
+        # test1的输出未被重写
+        assert json_file.stat().st_mtime == first_mtime
+
+    def test_split_and_save_force_rechunk(self, splitter, tmp_path):
+        """force=True时全量重新分块"""
+        input_dir = tmp_path / "input"
+        output_dir = tmp_path / "output"
+        input_dir.mkdir()
+        (input_dir / "test1.md").write_text("# 测试1\n\n内容A" * 50, encoding="utf-8")
+
+        with patch.object(TextSplitter, "split_markdown_file", wraps=splitter.split_markdown_file) as mock_split:
+            splitter.split_and_save(input_dir, output_dir, chunk_size=50)
+            splitter.split_and_save(input_dir, output_dir, chunk_size=50)  # 增量：不应再分块
+            assert mock_split.call_count == 1
+
+            splitter.split_and_save(input_dir, output_dir, chunk_size=50, force=True)
+            assert mock_split.call_count == 2  # force：重新分块
 
 
 class TestSplitTextDirect:

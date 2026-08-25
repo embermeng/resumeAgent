@@ -20,7 +20,8 @@ class TextSplitter:
     def count_tokens(self, text: str) -> int:
         """统计字符串的token数"""
         encoding = tiktoken.get_encoding(self.encoding_name)
-        return len(encoding.encode(text))
+        # disallowed_special=()：文本中可能出现特殊token字面量（如课件中的<|endoftext|>），按普通文本编码
+        return len(encoding.encode(text, disallowed_special=()))
 
     def split_text(
         self,
@@ -36,6 +37,8 @@ class TextSplitter:
             model_name="gpt-4o",
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
+            # 文本中可能包含特殊token字面量（如<|endoftext|>），禁用检查按普通文本编码
+            disallowed_special=(),
         )
         chunks = splitter.split_text(text)
         return [
@@ -64,23 +67,35 @@ class TextSplitter:
         category: str = "course",
         chunk_size: int = 300,
         chunk_overlap: int = 50,
+        force: bool = False,
     ):
         """
         批量处理目录下所有Markdown文件，分块并输出为JSON
+        增量分块：默认跳过output_dir中已存在结果的文档，force=True时全量重新分块
         参数:
             input_dir: 存放.md文件的目录
             output_dir: 输出.json文件的目录
             category: 知识分类 (course/project/interview)
             chunk_size: 分块大小(token数)
             chunk_overlap: 分块重叠token数
+            force: 是否强制全量重新分块
         """
         output_dir.mkdir(parents=True, exist_ok=True)
         md_files = list(input_dir.glob("*.md"))
 
+        skipped = 0
+        processed = 0
         for md_path in md_files:
-            chunks = self.split_markdown_file(md_path, chunk_size, chunk_overlap)
             source_name = md_path.stem
             doc_id = hashlib.md5(source_name.encode()).hexdigest()[:16]
+
+            # 增量跳过：已存在分块结果且非force
+            if not force and (output_dir / f"{doc_id}.json").exists():
+                print(f"跳过已分块文档: {md_path.name}")
+                skipped += 1
+                continue
+
+            chunks = self.split_markdown_file(md_path, chunk_size, chunk_overlap)
 
             # 构建输出格式
             output_data = {
@@ -102,9 +117,13 @@ class TextSplitter:
             with open(output_path, "w", encoding="utf-8") as f:
                 json.dump(output_data, f, ensure_ascii=False, indent=2)
 
+            processed += 1
             print(f"已分块: {md_path.name} -> {output_path.name} ({len(chunks)} chunks)")
 
-        print(f"共处理 {len(md_files)} 个文件, 输出到 {output_dir}")
+        print(
+            f"共 {len(md_files)} 个文件，跳过已分块 {skipped} 个，"
+            f"本次分块 {processed} 个，输出到 {output_dir}"
+        )
 
     def split_text_direct(
         self,

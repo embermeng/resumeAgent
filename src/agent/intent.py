@@ -83,7 +83,7 @@ class IntentClassifier:
 
     @staticmethod
     def _fallback_classify(user_input: str) -> IntentResult:
-        """基于关键词的降级分类"""
+        """基于关键词的降级分类（LLM分类失败时的兜底）"""
         input_lower = user_input.lower()
 
         # 简历相关关键词 -> deep_thinking
@@ -95,22 +95,10 @@ class IntentClassifier:
                 confidence=0.6,
             )
 
-        # 技术问题关键词 -> quick_response
-        tech_keywords = [
-            "什么", "怎么", "如何", "为什么", "区别", "原理", "流程",
-            "rag", "langchain", "faiss", "embedding", "agent", "llm",
-            "python", "java", "算法", "数据结构",
-        ]
-        if any(kw in input_lower for kw in tech_keywords):
-            return IntentResult(
-                intent=IntentType.QUICK_RESPONSE,
-                entities={},
-                confidence=0.5,
-            )
-
-        # 默认闲聊
+        # 默认走快速回答路径（检索知识库后回答），而非闲聊：
+        # 即使分类失败，也能保证用户问题经过知识库检索，避免纯靠LLM自身知识回答
         return IntentResult(
-            intent=IntentType.CHITCHAT,
+            intent=IntentType.QUICK_RESPONSE,
             entities={},
             confidence=0.3,
         )

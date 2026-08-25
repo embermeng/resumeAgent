@@ -1,4 +1,4 @@
-# Agent编排
+﻿# Agent编排
 langgraph>=0.2.0
 langchain>=0.3.0
 langchain-community>=0.3.0
@@ -15,6 +15,7 @@ streamlit>=1.38.0
 
 # 检索
 rank-bm25>=0.2.2
+jieba>=0.42.1
 
 # 数据模型
 pydantic>=2.9.0
@@ -25,8 +26,10 @@ python-dotenv>=1.0.1
 # Token计数
 tiktoken>=0.8.0
 
-# PDF解析
-PyPDF2>=3.0.1
+# PDF解析（MinerU）
+# 注意：需先单独安装 CUDA 版 PyTorch（RTX 50系Blackwell显卡必需）：
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130
+mineru[core]>=2.7.0
 
 # 工具
 click>=8.1.7

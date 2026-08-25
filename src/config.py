@@ -53,6 +53,14 @@ class PathConfig:
     def interview_chunks_dir(self) -> Path:
         return self.processed_dir / "interview_chunks"
 
+    @property
+    def course_summaries_dir(self) -> Path:
+        return self.processed_dir / "course_summaries"
+
+    @property
+    def catalog_path(self) -> Path:
+        return self.processed_dir / "catalog.json"
+
     # 向量数据库
     @property
     def databases_dir(self) -> Path:
@@ -75,6 +83,7 @@ class PathConfig:
             self.course_chunks_dir,
             self.project_extracts_dir,
             self.interview_chunks_dir,
+            self.course_summaries_dir,
             self.vector_dbs_dir,
             self.bm25_dbs_dir,
         ]:

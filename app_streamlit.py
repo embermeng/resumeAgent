@@ -67,47 +67,64 @@ if prompt := st.chat_input("输入你的问题..."):
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # Agent处理
+    # Agent处理（流式输出：边生成边展示）
     with st.chat_message("assistant"):
-        with st.spinner("思考中..."):
-            try:
-                agent = get_agent()
-                result = agent.run(prompt)
+        try:
+            agent = get_agent()
 
-                response = result.get("final_response", "抱歉，处理出错。")
-                intent = result.get("intent", "unknown")
-                step = result.get("step", "")
+            status_placeholder = st.empty()
+            answer_placeholder = st.empty()
+            intent_labels = {
+                "quick_response": "⚡ 快速回答",
+                "deep_thinking": "🧠 深度思考",
+                "chitchat": "💬 闲聊",
+            }
 
-                st.markdown(response)
+            intent = "unknown"
+            step = ""
+            full_response = ""
+            resume_final = ""
 
-                # 显示意图信息
-                intent_labels = {
-                    "quick_response": "⚡ 快速回答",
-                    "deep_thinking": "🧠 深度思考",
-                    "chitchat": "💬 闲聊",
-                }
-                st.caption(f"模式: {intent_labels.get(intent, intent)} | 步骤: {step}")
+            with status_placeholder.container():
+                for event in agent.run_stream(prompt):
+                    etype = event.get("type")
+                    if etype == "status":
+                        st.caption(f"⏳ {event['text']}")
+                    elif etype == "intent":
+                        intent = event["value"]
+                    elif etype == "token":
+                        # 首个token到达后释放状态区，答案区开始增量渲染
+                        status_placeholder.empty()
+                        full_response += event["text"]
+                        answer_placeholder.markdown(full_response + "▌")
+                    elif etype == "done":
+                        step = event.get("step", "")
+                        resume_final = event.get("resume_final", "") or ""
 
-                # 如果有简历草稿，提供下载
-                if result.get("resume_final"):
-                    st.download_button(
-                        "📥 下载简历 (Markdown)",
-                        result["resume_final"],
-                        file_name="resume.md",
-                        mime="text/markdown",
-                    )
+            # 流式结束：去掉光标，展示最终内容
+            answer_placeholder.markdown(full_response)
+            st.caption(f"模式: {intent_labels.get(intent, intent)} | 步骤: {step}")
 
-                # 保存消息
-                st.session_state.messages.append({
-                    "role": "assistant",
-                    "content": response,
-                    "intent": intent_labels.get(intent, intent),
-                })
+            # 如果有简历结果，提供下载
+            if resume_final:
+                st.download_button(
+                    "📥 下载简历 (Markdown)",
+                    resume_final,
+                    file_name="resume.md",
+                    mime="text/markdown",
+                )
 
-            except Exception as e:
-                error_msg = f"处理出错: {e}"
-                st.error(error_msg)
-                st.session_state.messages.append({
-                    "role": "assistant",
-                    "content": error_msg,
-                })
+            # 保存消息
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": full_response,
+                "intent": intent_labels.get(intent, intent),
+            })
+
+        except Exception as e:
+            error_msg = f"处理出错: {e}"
+            st.error(error_msg)
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": error_msg,
+            })

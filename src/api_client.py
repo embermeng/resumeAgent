@@ -21,12 +21,22 @@ logger = logging.getLogger(__name__)
 # ============================================================
 
 class BaseDashscopeProcessor:
-    """DashScope (通义千问) 处理器"""
+    """DashScope (通义千问) 处理器
+    使用OpenAI兼容端点(compatible-mode)：纯文本与多模态模型统一路由，
+    支持qwen3.8-max等新旗舰模型（原生SDK的Generation.call仅支持纯文本端点，
+    调用多模态模型会报400 url error）
+    """
+
+    COMPATIBLE_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
     def __init__(self):
-        import dashscope
-        dashscope.api_key = os.getenv("DASHSCOPE_API_KEY")
-        self._dashscope = dashscope
+        from openai import OpenAI
+        self.llm = OpenAI(
+            api_key=os.getenv("DASHSCOPE_API_KEY"),
+            base_url=self.COMPATIBLE_BASE_URL,
+            timeout=None,
+            max_retries=2,
+        )
         self.default_model = "qwen-turbo-latest"
         self.response_data = {}
 
@@ -49,26 +59,26 @@ class BaseDashscopeProcessor:
         if human_content:
             messages.append({"role": "user", "content": human_content})
 
-        response = self._dashscope.Generation.call(
-            model=model,
-            messages=messages,
-            temperature=temperature,
-            result_format="message",
-        )
+        # API错误（如403无权限、429限流）立即抛出，避免把错误响应当成正常内容吞掉
+        try:
+            completion = self.llm.chat.completions.create(
+                model=model,
+                temperature=temperature,
+                messages=messages,
+            )
+        except Exception as e:
+            status = getattr(e, "status_code", None)
+            raise RuntimeError(f"DashScope API错误 {status or 'unknown'}: {e}") from e
 
-        # 解析响应
-        if hasattr(response, "output") and hasattr(response.output, "choices"):
-            content = response.output.choices[0].message.content
-        else:
-            content = str(response)
+        content = completion.choices[0].message.content
 
         self.response_data = {
             "model": model,
-            "input_tokens": getattr(response.usage, "input_tokens", None) if hasattr(response, "usage") else None,
-            "output_tokens": getattr(response.usage, "output_tokens", None) if hasattr(response, "usage") else None,
+            "input_tokens": getattr(completion.usage, "prompt_tokens", None),
+            "output_tokens": getattr(completion.usage, "completion_tokens", None),
         }
 
-        # 尝试解析JSON（DashScope的结构化输出可能以JSON字符串形式返回）
+        # 尝试解析JSON（结构化输出可能以JSON字符串形式返回）
         if is_structured and response_format is not None:
             return self._parse_structured(content, response_format)
 
@@ -77,6 +87,38 @@ class BaseDashscopeProcessor:
             return self._try_parse_json(content)
         except (json.JSONDecodeError, TypeError):
             return {"content": content}
+
+    def send_message_stream(
+        self,
+        model: str = None,
+        temperature: float = 0.5,
+        system_content: str = "You are a helpful assistant.",
+        human_content: str = "Hello!",
+        **kwargs,
+    ):
+        """流式发送消息，逐块yield文本增量（SSE效果的数据源）"""
+        if model is None:
+            model = self.default_model
+
+        messages = []
+        if system_content:
+            messages.append({"role": "system", "content": system_content})
+        if human_content:
+            messages.append({"role": "user", "content": human_content})
+
+        try:
+            stream = self.llm.chat.completions.create(
+                model=model,
+                temperature=temperature,
+                messages=messages,
+                stream=True,
+            )
+            for chunk in stream:
+                if chunk.choices and chunk.choices[0].delta.content:
+                    yield chunk.choices[0].delta.content
+        except Exception as e:
+            status = getattr(e, "status_code", None)
+            raise RuntimeError(f"DashScope API错误 {status or 'unknown'}: {e}") from e
 
     def _parse_structured(self, content: str, response_format: Type[BaseModel]) -> dict:
         """解析结构化输出"""
@@ -178,6 +220,31 @@ class BaseOpenaiProcessor:
         }
         return content
 
+    def send_message_stream(
+        self,
+        model: str = None,
+        temperature: float = 0.5,
+        system_content: str = "You are a helpful assistant.",
+        human_content: str = "Hello!",
+        **kwargs,
+    ):
+        """流式发送消息，逐块yield文本增量"""
+        if model is None:
+            model = self.default_model
+
+        completion = self.llm.chat.completions.create(
+            model=model,
+            temperature=temperature,
+            messages=[
+                {"role": "system", "content": system_content},
+                {"role": "user", "content": human_content},
+            ],
+            stream=True,
+        )
+        for chunk in completion:
+            if chunk.choices and chunk.choices[0].delta.content:
+                yield chunk.choices[0].delta.content
+
 
 class BaseGeminiProcessor:
     """Gemini 处理器"""
@@ -237,6 +304,28 @@ class BaseGeminiProcessor:
             return {"content": content}
 
 
+    def send_message_stream(
+        self,
+        model: str = None,
+        temperature: float = 0.5,
+        system_content: str = "You are a helpful assistant.",
+        human_content: str = "Hello!",
+        **kwargs,
+    ):
+        """流式发送消息，逐块yield文本增量"""
+        if model is None:
+            model = self.default_model
+
+        prompt = f"{system_content}\n\n---\n\n{human_content}"
+        model_instance = self._genai.GenerativeModel(
+            model_name=model,
+            generation_config={"temperature": temperature},
+        )
+        for chunk in model_instance.generate_content(prompt, stream=True):
+            if chunk.text:
+                yield chunk.text
+
+
 # ============================================================
 # 统一API入口
 # ============================================================
@@ -288,6 +377,25 @@ class APIProcessor:
             human_content=human_content,
             is_structured=is_structured,
             response_format=response_format,
+            **kwargs,
+        )
+
+    def send_message_stream(
+        self,
+        model: str = None,
+        temperature: float = 0.5,
+        system_content: str = "You are a helpful assistant.",
+        human_content: str = "Hello!",
+        **kwargs,
+    ):
+        """流式发送消息，逐块yield文本增量"""
+        if model is None:
+            model = self.processor.default_model
+        return self.processor.send_message_stream(
+            model=model,
+            temperature=temperature,
+            system_content=system_content,
+            human_content=human_content,
             **kwargs,
         )
 

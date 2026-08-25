@@ -6,6 +6,8 @@
 import json
 import pickle
 import logging
+import shutil
+import tempfile
 from pathlib import Path
 from typing import List, Dict, Optional
 
@@ -13,8 +15,28 @@ import numpy as np
 import faiss
 
 from src.config import get_config
+from src.knowledge.tokenizer import tokenize
 
 _log = logging.getLogger(__name__)
+
+
+def read_faiss_index(faiss_path: Path):
+    """
+    加载FAISS索引（兼容中文路径）
+    FAISS C++层fopen不支持中文路径，先复制到临时文件再读取
+    """
+    path_str = str(faiss_path)
+    try:
+        return faiss.read_index(path_str)
+    except Exception:
+        # 中文路径失败时降级到临时文件方案
+        with tempfile.NamedTemporaryFile(suffix=".faiss", delete=False) as tmp:
+            tmp_path = tmp.name
+        try:
+            shutil.copyfile(path_str, tmp_path)
+            return faiss.read_index(tmp_path)
+        finally:
+            Path(tmp_path).unlink(missing_ok=True)
 
 
 class BM25Retriever:
@@ -46,14 +68,16 @@ class BM25Retriever:
         doc_id: str = None,
         category: str = None,
         top_n: int = 5,
+        doc_ids: List[str] = None,
     ) -> List[Dict]:
         """
         检索文本块
         参数:
             query: 查询文本
-            doc_id: 指定文档ID（可选）
+            doc_id: 指定单个文档ID（可选）
             category: 按类别过滤 (course/project/interview)
             top_n: 返回结果数
+            doc_ids: 限定只检索这些文档（分层检索定向召回用）
         返回:
             [{"text": str, "score": float, "source": str, "doc_id": str}, ...]
         """
@@ -61,11 +85,13 @@ class BM25Retriever:
 
         # 确定要检索的文档
         if doc_id:
-            doc_ids = [doc_id]
+            target_doc_ids = [doc_id]
+        elif doc_ids:
+            target_doc_ids = doc_ids
         else:
-            doc_ids = self._find_doc_ids(category)
+            target_doc_ids = self._find_doc_ids(category)
 
-        for did in doc_ids:
+        for did in target_doc_ids:
             try:
                 document = self._load_document(did)
                 bm25_index = self._load_bm25_index(did)
@@ -73,7 +99,8 @@ class BM25Retriever:
                 continue
 
             chunks = document["content"]["chunks"]
-            tokenized_query = query.split()
+            # 必须与索引构建侧使用同一分词器（jieba），中文无空格不能用split()
+            tokenized_query = tokenize(query)
             scores = bm25_index.get_scores(tokenized_query)
 
             actual_top_n = min(top_n, len(scores))
@@ -82,6 +109,9 @@ class BM25Retriever:
             )[:actual_top_n]
 
             for idx in top_indices:
+                # 过滤零分结果：无任何词匹配时不返回无关分块
+                if scores[idx] <= 0:
+                    continue
                 results.append({
                     "text": chunks[idx]["text"],
                     "score": round(float(scores[idx]), 4),
@@ -145,7 +175,7 @@ class VectorRetriever:
                 continue
 
             try:
-                vector_db = faiss.read_index(str(faiss_path))
+                vector_db = read_faiss_index(faiss_path)
             except Exception as e:
                 _log.error(f"加载向量库失败 {faiss_path.name}: {e}")
                 continue
@@ -168,6 +198,7 @@ class VectorRetriever:
         query: str,
         category: str = None,
         top_n: int = 5,
+        doc_ids: List[str] = None,
     ) -> List[Dict]:
         """
         向量检索
@@ -175,6 +206,7 @@ class VectorRetriever:
             query: 查询文本
             category: 按类别过滤
             top_n: 返回结果数
+            doc_ids: 限定只检索这些文档（分层检索定向召回用）
         返回:
             [{"text": str, "distance": float, "source": str, "doc_id": str}, ...]
         """
@@ -183,6 +215,10 @@ class VectorRetriever:
 
         all_results = []
         for db_info in self.all_dbs:
+            # doc_ids过滤（优先于category）
+            if doc_ids and db_info["doc_id"] not in doc_ids:
+                continue
+
             document = db_info["document"]
             # 类别过滤
             if category and document["metainfo"].get("category") != category:
@@ -233,12 +269,15 @@ class HybridRetriever:
         category: str = None,
         top_n: int = 5,
         vector_weight: float = 0.6,
+        doc_ids: List[str] = None,
     ) -> List[Dict]:
         """
         混合检索：合并向量和BM25结果
+        参数:
+            doc_ids: 限定只检索这些文档（分层检索定向召回用）
         """
-        vector_results = self.vector_retriever.retrieve(query, category, top_n=top_n * 2)
-        bm25_results = self.bm25_retriever.retrieve(query, category=category, top_n=top_n * 2)
+        vector_results = self.vector_retriever.retrieve(query, category, top_n=top_n * 2, doc_ids=doc_ids)
+        bm25_results = self.bm25_retriever.retrieve(query, category=category, top_n=top_n * 2, doc_ids=doc_ids)
 
         # 合并结果（简单加权）
         merged = {}

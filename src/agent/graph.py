@@ -22,7 +22,11 @@ class ResumeAgent:
 
     def __init__(self, config=None):
         self.config = config or get_config()
-        self.intent_classifier = IntentClassifier(provider=self.config.llm.provider)
+        # 必须显式传model：API客户端默认模型(qwen-turbo-latest)可能无权限，会导致意图识别永远失败
+        self.intent_classifier = IntentClassifier(
+            provider=self.config.llm.provider,
+            model=self.config.llm.model,
+        )
         self.tools = AgentTools(config=self.config)
         self.api = APIProcessor(provider=self.config.llm.provider)
         self.graph = self._build_graph()
@@ -111,20 +115,17 @@ class ResumeAgent:
         }
 
     def _deep_thinking_path(self, state: AgentState) -> Dict:
-        """深思熟虑路径：多步检索 -> 草稿 -> 优化"""
+        """深思熟虑路径：分层检索（目录选点->定向检索） -> 草稿 -> 优化"""
         user_input = state.get("user_input", "")
         entities = state.get("extracted_entities", {})
         has_job = state.get("has_job_requirement", False)
 
-        # 多步检索：并行获取知识和项目
-        knowledge = self.tools.search_knowledge(user_input, top_n=10)
-        projects = self.tools.search_projects(user_input, top_n=5)
-
         # 提取岗位要求（如有）
-        job_requirement = None
-        if has_job:
-            # 简单提取：查找JD相关文本
-            job_requirement = entities.get("job_requirement", user_input)
+        job_requirement = entities.get("job_requirement", user_input) if has_job else None
+
+        # 分层检索：LLM根据课程目录选高价值知识点 -> 定向检索对应课程；失败降级为普通混合检索
+        knowledge = self._hierarchical_search(user_input, job_requirement)
+        projects = self.tools.search_projects(user_input, top_n=5)
 
         # 生成简历草稿
         resume_draft = self.tools.generate_resume(
@@ -146,6 +147,23 @@ class ResumeAgent:
             "final_response": resume_final,
             "step": "deep_thinking_done",
         }
+
+    def _hierarchical_search(self, user_input: str, job_requirement: str = None) -> str:
+        """分层检索：目录选点 -> 定向检索；任一环节失败降级为普通混合检索"""
+        try:
+            plan = self.tools.select_resume_knowledge(user_input, job_requirement)
+        except Exception as e:
+            _log.warning(f"知识点选择异常: {e}")
+            plan = None
+
+        if plan:
+            _log.info(f"分层检索命中 {len(plan.selections)} 门课程")
+            knowledge = self.tools.retrieve_by_plan(plan)
+            if knowledge and knowledge != "未检索到相关知识。":
+                return knowledge
+
+        _log.info("分层检索不可用，降级为普通混合检索")
+        return self.tools.search_knowledge(user_input, top_n=10)
 
     def _chitchat_path(self, state: AgentState) -> Dict:
         """闲聊兜底路径"""
@@ -194,3 +212,83 @@ class ResumeAgent:
 
         result = self.graph.invoke(initial_state)
         return result
+
+    def run_stream(self, user_input: str):
+        """
+        流式运行Agent，逐步yield事件字典（供Web UI增量渲染，SSE效果）
+        事件类型:
+            {"type": "status", "text": str}  阶段进度提示
+            {"type": "token", "text": str}   回答文本增量
+            {"type": "done", ...}            结束，携带intent/final_response等完整结果
+        """
+        # Step 1: 意图识别
+        yield {"type": "status", "text": "正在识别意图..."}
+        result = self.intent_classifier.classify(user_input)
+        intent = result.intent.value
+        entities = result.entities
+        has_job = bool(entities.get("job_title")) or any(
+            kw in user_input.lower() for kw in ["jd", "岗位要求", "职位描述"]
+        )
+        yield {"type": "intent", "value": intent}
+
+        if intent == "quick_response":
+            # 快速回答：检索 -> 流式回答
+            tech_keywords = entities.get("tech_keywords", [])
+            query = " ".join(tech_keywords) if tech_keywords else user_input
+            category = "project" if entities.get("project_name") else None
+
+            yield {"type": "status", "text": "正在检索知识库..."}
+            knowledge = self.tools.search_knowledge(query, category=category)
+
+            yield {"type": "status", "text": "正在生成回答..."}
+            try:
+                for chunk in self.tools.answer_question_stream(user_input, knowledge):
+                    yield {"type": "token", "text": chunk}
+            except Exception as e:
+                _log.error(f"流式回答失败: {e}")
+                yield {"type": "token", "text": f"抱歉，回答问题时出现错误: {e}"}
+
+            yield {"type": "done", "intent": intent, "step": "quick_response_done",
+                   "retrieved_knowledge": knowledge}
+
+        elif intent == "deep_thinking":
+            # 深思路径：多步调用，简历为长文档，保持非流式，输出阶段进度
+            job_requirement = entities.get("job_requirement", user_input) if has_job else None
+
+            yield {"type": "status", "text": "正在分析课程目录，挑选高价值知识点..."}
+            knowledge = self._hierarchical_search(user_input, job_requirement)
+
+            yield {"type": "status", "text": "正在检索项目经历..."}
+            projects = self.tools.search_projects(user_input, top_n=5)
+
+            yield {"type": "status", "text": "正在生成简历草稿（耗时较长，请稍候）..."}
+            resume_draft = self.tools.generate_resume(
+                knowledge=knowledge, projects=projects, job_requirement=job_requirement,
+            )
+
+            resume_final = resume_draft
+            if has_job and job_requirement:
+                yield {"type": "status", "text": "正在按岗位要求优化简历..."}
+                resume_final = self.tools.optimize_resume(resume_draft, job_requirement)
+
+            yield {"type": "token", "text": resume_final}
+            yield {"type": "done", "intent": intent, "step": "deep_thinking_done",
+                   "retrieved_knowledge": knowledge, "retrieved_projects": projects,
+                   "resume_draft": resume_draft, "resume_final": resume_final}
+
+        else:
+            # 闲聊：流式输出
+            try:
+                for chunk in self.api.send_message_stream(
+                    model=self.config.llm.model,
+                    temperature=0.7,
+                    system_content=CHITCHAT_SYSTEM,
+                    human_content=user_input,
+                ):
+                    yield {"type": "token", "text": chunk}
+            except Exception as e:
+                _log.error(f"闲聊流式输出失败: {e}")
+                yield {"type": "token",
+                       "text": "你好！我是ResumeAgent，你的简历生成和知识问答助手。请问有什么可以帮你的？"}
+
+            yield {"type": "done", "intent": "chitchat", "step": "chitchat_done"}

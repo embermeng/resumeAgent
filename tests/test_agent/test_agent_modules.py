@@ -104,7 +104,16 @@ class TestIntentClassifier:
         """测试API异常时降级"""
         mock_api.send_message.side_effect = Exception("API Error")
         result = classifier.classify("RAG是什么")
-        # 降级应分类为quick_response（包含"什么"）
+        # 降级应分类为quick_response（保证走知识库检索）
+        assert result.intent == IntentType.QUICK_RESPONSE
+
+    def test_classify_parse_error_fallback(self, classifier, mock_api):
+        """测试API返回错误响应（如403被吞掉后产生parse_error）时降级为检索问答"""
+        mock_api.send_message.return_value = {
+            "content": "{'status_code': 403, 'code': 'AccessDenied'}",
+            "parse_error": "intent Field required",
+        }
+        result = classifier.classify("推测解码是不是草稿模型和打分模型配合？")
         assert result.intent == IntentType.QUICK_RESPONSE
 
     def test_fallback_resume_keywords(self):
@@ -112,15 +121,12 @@ class TestIntentClassifier:
         result = IntentClassifier._fallback_classify("帮我生成简历")
         assert result.intent == IntentType.DEEP_THINKING
 
-    def test_fallback_tech_keywords(self):
-        """测试降级分类 - 技术关键词"""
-        result = IntentClassifier._fallback_classify("FAISS怎么用")
-        assert result.intent == IntentType.QUICK_RESPONSE
-
-    def test_fallback_chitchat(self):
-        """测试降级分类 - 闲聊"""
+    def test_fallback_default_quick_response(self):
+        """降级默认走快速回答（检索后回答），而非闲聊，避免纯靠LLM自身知识回答"""
         result = IntentClassifier._fallback_classify("今天天气真好")
-        assert result.intent == IntentType.CHITCHAT
+        assert result.intent == IntentType.QUICK_RESPONSE
+        result = IntentClassifier._fallback_classify("推测解码是不是草稿模型和打分模型配合？")
+        assert result.intent == IntentType.QUICK_RESPONSE
 
 
 # ============================================================

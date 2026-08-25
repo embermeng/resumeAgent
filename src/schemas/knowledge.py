@@ -31,3 +31,26 @@ class KnowledgeDocument(BaseModel):
     category: Literal["course", "project", "interview"] = Field(description="知识分类")
     chunks: List[KnowledgeChunk] = Field(default_factory=list, description="文本块列表")
     metadata: Dict[str, Any] = Field(default_factory=dict, description="文档级元数据")
+
+
+class CourseSummary(BaseModel):
+    """课程结构化摘要（分层检索第一层：供LLM浏览目录选点）"""
+    course_name: str = Field(description="课程名称")
+    one_line_intro: str = Field(description="一句话课程定位")
+    key_points: List[str] = Field(
+        description="适合作为简历技能点的核心知识点，5-10条，每条含技术名词与能解决的问题",
+        min_length=1,
+    )
+    tech_keywords: List[str] = Field(default_factory=list, description="技术关键词列表")
+
+
+class DocSelection(BaseModel):
+    """单个课程的选中知识点"""
+    doc_id: str = Field(description="课程文档ID")
+    selected_points: List[str] = Field(description="选中的知识点（将作为检索查询词）", min_length=1)
+
+
+class SelectionPlan(BaseModel):
+    """简历知识点选择计划（分层检索第二层的输入）"""
+    selections: List[DocSelection] = Field(default_factory=list, description="选中的课程及其知识点")
+    reason: str = Field(default="", description="选择理由简述")

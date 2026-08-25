@@ -69,7 +69,7 @@ cp .env.example .env
 ```ini
 # 选择 LLM 提供商：dashscope / openai / gemini
 DEFAULT_LLM_PROVIDER=dashscope
-DEFAULT_LLM_MODEL=qwen-turbo-latest
+DEFAULT_LLM_MODEL=qwen3.8-max
 DASHSCOPE_API_KEY=sk-xxxxxxxxxxxxxxxx
 
 # 如果用 OpenAI
@@ -151,6 +151,28 @@ python main.py build-indexes
 python main.py extract-projects
 ```
 
+### 增量构建机制
+
+以上各环节（解析、分块、索引构建）默认都是**增量执行**：
+
+- 已解析/已分块/已建索引的文档会自动跳过，只处理新增文档
+- 源文档更新过（如用 `--force` 重新解析）时，下游分块和索引会自动感知并重建
+- 新增 PDF 后直接运行 `python main.py build-all`，只有新文档会调 embedding API，不会重复花钱
+
+常用可选参数：
+
+```bash
+# 强制全量重新执行（解析/分块/建索引各命令均支持）
+python main.py build-all --force
+python main.py parse-pdfs --force
+python main.py split-chunks --force
+python main.py build-indexes --force
+
+# 删除或改名了 PDF 后，清理残留的孤儿索引
+python main.py build-indexes --prune
+python main.py build-all --prune
+```
+
 ### 构建完成后
 
 构建完成后，数据会存储在以下目录：
@@ -180,6 +202,8 @@ streamlit run app_streamlit.py
 ```
 
 浏览器会自动打开 `http://localhost:8501`，在聊天框中直接输入即可。
+
+回答采用**流式输出**（SSE效果）：先显示阶段进度（意图识别 → 知识库检索 → 生成回答），然后逐字展示答案，无需等待全部生成完毕。
 
 **使用示例：**
 
@@ -265,9 +289,11 @@ Agent 通过 **意图识别** 自动选择处理路径：
 
 | 提供商 | 配置值 | 示例模型 |
 |--------|--------|---------|
-| 通义千问 (DashScope) | `dashscope` | qwen-turbo-latest, qwen-plus |
+| 通义千问 (DashScope) | `dashscope` | qwen3.8-max, qwen3-max, qwen-plus |
 | OpenAI | `openai` | gpt-4o, gpt-4o-mini |
 | Gemini | `gemini` | gemini-pro |
+
+> 注：`dashscope` 提供商内部使用 OpenAI 兼容端点（compatible-mode）调用，纯文本与多模态模型（如 qwen3.8-max）均可正常使用。
 
 ---
 
@@ -288,8 +314,8 @@ pytest tests/test_knowledge/ -v
 
 **Q: PDF 解析失败怎么办？**
 
-项目使用 Docling 解析 PDF。如果某些 PDF 格式特殊导致解析失败，可以尝试：
-- 确认 PDF 文件不是扫描件（扫描件需要先 OCR）
+项目使用 MinerU 解析 PDF（GPU 加速）。如果某些 PDF 格式特殊导致解析失败，可以尝试：
+- 确认 PDF 文件不是扫描件（扫描件需启用 OCR）
 - 检查 PDF 是否加密
 
 **Q: 项目精华提炼结果不准确？**
@@ -298,7 +324,7 @@ pytest tests/test_knowledge/ -v
 
 **Q: 如何更新知识库？**
 
-重新运行 `python main.py build-all` 即可。已有的索引会被覆盖。
+放入新 PDF 后重新运行 `python main.py build-all` 即可。各环节默认增量执行，只处理新增/更新过的文档；如需全量重建加 `--force`，删除过 PDF 后加 `--prune` 清理孤儿索引。
 
 **Q: 支持哪些知识来源？**
 
@@ -315,7 +341,7 @@ pytest tests/test_knowledge/ -v
 - **LLM 工具链**：LangChain
 - **向量数据库**：FAISS
 - **全文检索**：BM25 (rank-bm25)
-- **PDF 解析**：Docling
+- **PDF 解析**：MinerU
 - **Token 计数**：tiktoken
 - **数据模型**：Pydantic v2
 - **Web UI**：Streamlit

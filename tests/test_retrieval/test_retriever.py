@@ -10,7 +10,30 @@ from unittest.mock import patch, MagicMock
 
 import faiss
 
-from src.retrieval.retriever import BM25Retriever, VectorRetriever, HybridRetriever
+from src.retrieval.retriever import BM25Retriever, VectorRetriever, HybridRetriever, read_faiss_index
+from src.knowledge.tokenizer import tokenize
+
+
+class TestReadFaissIndex:
+    def test_read_chinese_path(self, tmp_path):
+        """中文路径下的faiss索引应能正常加载（FAISS C++层fopen不支持中文路径，需临时文件降级）"""
+        chinese_dir = tmp_path / "中文目录"
+        chinese_dir.mkdir()
+        index_path = chinese_dir / "测试索引.faiss"
+
+        dim = 8
+        index = faiss.IndexFlatIP(dim)
+        index.add(np.random.rand(3, dim).astype(np.float32))
+        # 写入也走临时文件，避免中文路径写入失败
+        import tempfile, shutil
+        with tempfile.NamedTemporaryFile(suffix=".faiss", delete=False) as tmp:
+            tmp_path_str = tmp.name
+        faiss.write_index(index, tmp_path_str)
+        shutil.move(tmp_path_str, str(index_path))
+
+        loaded = read_faiss_index(index_path)
+        assert loaded.ntotal == 3
+        assert loaded.d == dim
 
 
 @pytest.fixture
@@ -54,15 +77,45 @@ def setup_bm25_env(tmp_path, sample_doc_data, doc_with_project):
         with open(docs_dir / f"{doc_id}.json", "w", encoding="utf-8") as f:
             json.dump(doc, f, ensure_ascii=False)
 
-    # 创建BM25索引
+    # 创建BM25索引（必须与生产代码使用同一分词器）
     from rank_bm25 import BM25Okapi
     for doc in [sample_doc_data, doc_with_project]:
         doc_id = doc["metainfo"]["doc_id"]
         texts = [c["text"] for c in doc["content"]["chunks"]]
-        tokenized = [t.split() for t in texts]
+        tokenized = [tokenize(t) for t in texts]
         index = BM25Okapi(tokenized)
         with open(bm25_dir / f"{doc_id}.pkl", "wb") as f:
             pickle.dump(index, f)
+
+    return docs_dir, bm25_dir
+
+
+@pytest.fixture
+def setup_chinese_bm25_env(tmp_path):
+    """设置中文BM25检索环境（验证jieba分词链路）"""
+    docs_dir = tmp_path / "docs"
+    bm25_dir = tmp_path / "bm25"
+    docs_dir.mkdir()
+    bm25_dir.mkdir()
+
+    doc = {
+        "metainfo": {"doc_id": "cn1", "source": "AI服务核心", "category": "course"},
+        "content": {
+            "chunks": [
+                {"id": 0, "text": "推测解码是一种加速大模型推理的技术，由草稿模型生成候选token，目标模型并行验证。"},
+                {"id": 1, "text": "高并发场景下需要做好负载均衡和限流降级。"},
+                {"id": 2, "text": "性能监控需要关注吞吐量和延迟指标。"},
+            ]
+        },
+    }
+    with open(docs_dir / "cn1.json", "w", encoding="utf-8") as f:
+        json.dump(doc, f, ensure_ascii=False)
+
+    from rank_bm25 import BM25Okapi
+    texts = [c["text"] for c in doc["content"]["chunks"]]
+    index = BM25Okapi([tokenize(t) for t in texts])
+    with open(bm25_dir / "cn1.pkl", "wb") as f:
+        pickle.dump(index, f)
 
     return docs_dir, bm25_dir
 
@@ -115,10 +168,35 @@ class TestBM25Retriever:
         for r in results:
             assert r["doc_id"] == "doc1"
 
+    def test_retrieve_by_doc_ids(self, setup_bm25_env):
+        """doc_ids过滤：分层检索定向召回，只返回指定文档的结果"""
+        docs_dir, bm25_dir = setup_bm25_env
+        retriever = BM25Retriever(bm25_dir, docs_dir)
+        # 查询词在两个文档都可能命中，但限定doc_ids后只能来自doc1
+        results = retriever.retrieve("项目 技术栈 RAG", doc_ids=["doc1"], top_n=10)
+        for r in results:
+            assert r["doc_id"] == "doc1"
+
     def test_retrieve_empty_result(self, setup_bm25_env):
         docs_dir, bm25_dir = setup_bm25_env
         retriever = BM25Retriever(bm25_dir, docs_dir)
         results = retriever.retrieve("完全不相关的xyzquery", doc_id="nonexistent")
+        assert results == []
+
+    def test_retrieve_chinese(self, setup_chinese_bm25_env):
+        """中文查询应能通过jieba分词命中相关分块（回归：split()对中文无效）"""
+        docs_dir, bm25_dir = setup_chinese_bm25_env
+        retriever = BM25Retriever(bm25_dir, docs_dir)
+        results = retriever.retrieve("推测解码是不是草稿模型配合打分模型？", top_n=3)
+        assert len(results) > 0
+        assert "推测解码" in results[0]["text"]
+        assert results[0]["score"] > 0
+
+    def test_retrieve_zero_score_filtered(self, setup_chinese_bm25_env):
+        """无任何词匹配时（全部零分）不应返回无关分块"""
+        docs_dir, bm25_dir = setup_chinese_bm25_env
+        retriever = BM25Retriever(bm25_dir, docs_dir)
+        results = retriever.retrieve("zzz qqq xxx", top_n=3)
         assert results == []
 
 
@@ -142,6 +220,17 @@ class TestVectorRetriever:
         for r in results:
             assert r["doc_id"] == "doc2"
 
+    @patch("src.retrieval.retriever.VectorRetriever._get_embedding")
+    def test_retrieve_by_doc_ids(self, mock_embed, setup_vector_env):
+        """doc_ids过滤：分层检索定向召回"""
+        docs_dir, vec_dir = setup_vector_env
+        mock_embed.return_value = [0.1] * 8
+        retriever = VectorRetriever(vec_dir, docs_dir)
+        results = retriever.retrieve("项目", top_n=10, doc_ids=["doc1"])
+        assert len(results) > 0
+        for r in results:
+            assert r["doc_id"] == "doc1"
+
 
 class TestHybridRetriever:
     @patch("src.retrieval.retriever.VectorRetriever._get_embedding")
@@ -157,3 +246,16 @@ class TestHybridRetriever:
         for r in results:
             assert "score" in r
             assert "text" in r
+
+    @patch("src.retrieval.retriever.VectorRetriever._get_embedding")
+    def test_hybrid_retrieve_by_doc_ids(self, mock_embed, setup_bm25_env, setup_vector_env):
+        """混合检索doc_ids过滤：向量和BM25两路都应限定在指定文档"""
+        docs_dir, bm25_dir = setup_bm25_env
+        _, vec_dir = setup_vector_env
+        mock_embed.return_value = [0.1] * 8
+
+        retriever = HybridRetriever(vec_dir, bm25_dir, docs_dir)
+        results = retriever.retrieve("项目 技术栈 RAG", top_n=10, doc_ids=["doc2"])
+        assert len(results) > 0
+        for r in results:
+            assert r["doc_id"] == "doc2"
