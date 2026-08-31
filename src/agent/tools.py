@@ -5,15 +5,18 @@ Agent工具定义
 import json
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict, List, Tuple
 
 from src.api_client import APIProcessor
 from src.retrieval.retriever import BM25Retriever, VectorRetriever, HybridRetriever
 from src.config import get_config
+from src.knowledge.intro_selector import IntroSelector, PRIORITY_TAG
 from src.schemas.knowledge import SelectionPlan
+from src.schemas.project import IntroSelectionPlan
 from src.prompts.knowledge_prompts import (
     KNOWLEDGE_QA_SYSTEM, KNOWLEDGE_QA_USER,
     RESUME_KNOWLEDGE_SELECT_SYSTEM, RESUME_KNOWLEDGE_SELECT_USER,
+    INTRO_SELECT_SYSTEM, INTRO_SELECT_USER,
 )
 from src.prompts.resume_prompts import (
     RESUME_GENERATE_SYSTEM, RESUME_GENERATE_USER,
@@ -21,6 +24,9 @@ from src.prompts.resume_prompts import (
 )
 
 _log = logging.getLogger(__name__)
+
+# 介绍文档数量不超过该值时全部直接使用，省去一次LLM挑选调用
+INTRO_SMALL_COUNT = 6
 
 
 class AgentTools:
@@ -31,6 +37,9 @@ class AgentTools:
         self._vector_retriever = None
         self._bm25_retriever = None
         self._hybrid_retriever = None
+        self._intro_selector = None
+        # 共享持久API客户端：连接池保持TLS长连接，避免每次LLM调用新建连接
+        self._api = APIProcessor(provider=self.config.llm.provider)
 
     @property
     def vector_retriever(self):
@@ -64,6 +73,12 @@ class AgentTools:
             )
         return self._hybrid_retriever
 
+    @property
+    def intro_selector(self):
+        if self._intro_selector is None:
+            self._intro_selector = IntroSelector()
+        return self._intro_selector
+
     def search_knowledge(self, query: str, category: str = None, top_n: int = 5) -> str:
         """
         从知识库检索课程知识点（混合检索：BM25关键词 + 向量语义）
@@ -87,20 +102,186 @@ class AgentTools:
 
         if not results:
             return "未检索到相关知识。"
+        return self._format_results(results)
 
+    @staticmethod
+    def _format_results(results) -> str:
+        """检索结果统一格式化：编号 + 来源 + 正文"""
         formatted = []
         for i, r in enumerate(results, 1):
             source = r.get("source", "未知来源")
             text = r.get("text", "")
             formatted.append(f"[{i}] 来源: {source}\n{text}")
-
         return "\n\n---\n\n".join(formatted)
 
     def search_projects(self, query: str, top_n: int = 5) -> str:
         """
-        从知识库检索项目精华
+        从知识库检索项目亮点素材：
+        打了“简历优先”标签的项目按项目均分名额定向检索、轮询交错合并，
+        保证每个重点项目都进入上下文；剩余名额用全局项目检索补齐（去重）。
+        无标签文档时退化为普通混合检索。
         """
-        return self.search_knowledge(query, category="project", top_n=top_n)
+        tagged = self.list_tagged_project_ids()
+        if not tagged:
+            return self.search_knowledge(query, category="project", top_n=top_n)
+
+        per_doc = max(1, top_n // len(tagged))
+        per_project = []
+        for doc_id, _source in tagged:
+            try:
+                results = self.hybrid_retriever.retrieve(
+                    query, category="project", top_n=per_doc, doc_ids=[doc_id]
+                )
+            except Exception as e:
+                _log.warning(f"优先项目混合检索失败: {e}, 降级BM25")
+                try:
+                    results = self.bm25_retriever.retrieve(
+                        query, category="project", top_n=per_doc, doc_ids=[doc_id]
+                    )
+                except Exception as e2:
+                    _log.error(f"优先项目BM25检索也失败: {e2}")
+                    continue
+            per_project.append(results)
+
+        # 轮询交错合并：每轮每个项目取一块，保证各项目分布均衡
+        merged = []
+        seen = set()
+        round_idx = 0
+        while len(merged) < top_n:
+            added = False
+            for results in per_project:
+                if round_idx < len(results) and len(merged) < top_n:
+                    r = results[round_idx]
+                    key = (r.get("doc_id"), r.get("chunk_id"))
+                    if key not in seen:
+                        seen.add(key)
+                        merged.append(r)
+                        added = True
+            if not added:
+                break
+            round_idx += 1
+
+        # 剩余名额用全局项目检索补齐（去重）；全局检索失败不影响已选的优先项目
+        if len(merged) < top_n:
+            try:
+                global_results = self.hybrid_retriever.retrieve(
+                    query, category="project", top_n=top_n
+                )
+            except Exception as e:
+                _log.warning(f"全局项目检索失败: {e}，仅使用优先项目结果")
+                global_results = []
+            for r in global_results:
+                if len(merged) >= top_n:
+                    break
+                key = (r.get("doc_id"), r.get("chunk_id"))
+                if key not in seen:
+                    seen.add(key)
+                    merged.append(r)
+
+        if not merged:
+            return self.search_knowledge(query, category="project", top_n=top_n)
+        return self._format_results(merged)
+
+    def list_tagged_project_ids(self, tag: str = PRIORITY_TAG) -> List[Tuple[str, str]]:
+        """扫描项目分块文档，返回带指定标签的 [(doc_id, source), ...]"""
+        tagged = []
+        chunks_dir = self.config.paths.course_chunks_dir
+        for p in sorted(Path(chunks_dir).glob("project-*.json")):
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    meta = json.load(f).get("metainfo", {})
+            except Exception:
+                continue
+            if meta.get("category") == "project" and tag in meta.get("tags", []):
+                tagged.append((meta.get("doc_id", ""), meta.get("source", "")))
+        return tagged
+
+    # ----------------------------------------------------------
+    # 项目介绍文档挑选（简历生成的项目素材主路径）
+    # ----------------------------------------------------------
+
+    def select_project_intros(
+        self, user_input: str, job_requirement: str = None, top_n: int = 5
+    ) -> str:
+        """
+        从 project_intros/ 挑选适合本次简历的项目介绍成品，拼接为素材文本。
+        规则：带“简历优先”标签的项目必选且排前；文档数≤INTRO_SMALL_COUNT时全选；
+        否则由LLM按诉求/岗位从轻量目录中挑选（失败降级为标签+文件顺序兜底）。
+        无介绍文档时返回空串，调用方应降级用 search_projects 检索亮点分块。
+        """
+        entries = self.intro_selector.scan(self.config.paths.project_intros_dir)
+        if not entries:
+            return ""
+
+        tagged = [e for e in entries if PRIORITY_TAG in e["tags"]]
+
+        if len(entries) <= INTRO_SMALL_COUNT:
+            # 文档少：全部使用，标签项目排前，不调LLM
+            selected = tagged + [e for e in entries if e not in tagged]
+        else:
+            chosen_names = self._llm_select_intros(entries, user_input, job_requirement, top_n)
+            if chosen_names is None:
+                # 挑选调用失败：标签项目 + 文件顺序兜底补齐
+                selected = tagged + [e for e in entries if e not in tagged]
+                selected = selected[: max(top_n, len(tagged))]
+            else:
+                by_name = {e["name"]: e for e in entries}
+                picked = [by_name[n] for n in chosen_names if n in by_name]
+                picked = [e for e in picked if e not in tagged]
+                selected = (tagged + picked)[: max(top_n, len(tagged))]
+
+        if not selected:
+            return ""
+
+        formatted = [
+            f"[{i}] 项目：{e['name']}\n{e['text']}"
+            for i, e in enumerate(selected, 1)
+        ]
+        _log.info(f"简历项目素材已选 {len(selected)} 个介绍文档: "
+                  f"{[e['name'] for e in selected]}")
+        return "\n\n---\n\n".join(formatted)
+
+    def _llm_select_intros(
+        self, entries: List[Dict], user_input: str, job_requirement: str = None,
+        top_n: int = 5,
+    ) -> Optional[List[str]]:
+        """LLM从介绍目录中挑选项目，返回项目名列表；失败返回None（调用方降级）"""
+        catalog = self.intro_selector.build_catalog(entries)
+        job_section = f"\n## 目标岗位要求\n{job_requirement}" if job_requirement else ""
+
+        try:
+            result = self._api.send_message(
+                model=self.config.llm.model,
+                temperature=0.3,
+                system_content=INTRO_SELECT_SYSTEM,
+                human_content=INTRO_SELECT_USER.format(
+                    catalog=catalog, user_input=user_input,
+                    job_section=job_section, top_n=top_n,
+                ),
+                is_structured=True,
+                response_format=IntroSelectionPlan,
+            )
+        except Exception as e:
+            _log.error(f"项目介绍挑选调用失败: {e}")
+            return None
+
+        if result.get("parse_error"):
+            _log.error(f"项目介绍挑选解析失败: {result['parse_error'][:200]}")
+            return None
+        try:
+            plan = IntroSelectionPlan.model_validate(result)
+        except Exception as e:
+            _log.error(f"项目介绍挑选校验失败: {e}")
+            return None
+
+        # 防LLM编造：只保留目录中真实存在的项目名，去重保序
+        valid_names = {e["name"] for e in entries}
+        seen, picked = set(), []
+        for n in plan.selected_projects:
+            if n in valid_names and n not in seen:
+                seen.add(n)
+                picked.append(n)
+        return picked
 
     # ----------------------------------------------------------
     # 分层检索（课程目录选点 -> 定向检索）
@@ -133,8 +314,7 @@ class AgentTools:
         catalog_text = json.dumps(courses, ensure_ascii=False, indent=1)
 
         try:
-            api = APIProcessor(provider=self.config.llm.provider)
-            result = api.send_message(
+            result = self._api.send_message(
                 model=self.config.llm.model,
                 temperature=0.3,
                 system_content=RESUME_KNOWLEDGE_SELECT_SYSTEM,
@@ -226,8 +406,7 @@ class AgentTools:
         """
         基于检索上下文回答问题
         """
-        provider = provider or self.config.llm.provider
-        api = APIProcessor(provider=provider)
+        api = APIProcessor(provider=provider) if provider else self._api
 
         user_prompt = KNOWLEDGE_QA_USER.format(context=context, question=question)
 
@@ -237,6 +416,8 @@ class AgentTools:
                 temperature=0.3,
                 system_content=KNOWLEDGE_QA_SYSTEM,
                 human_content=user_prompt,
+                # 问答是轻任务，关闭thinking降低首响应延迟
+                enable_thinking=False,
             )
             if isinstance(result, dict):
                 return result.get("content", str(result))
@@ -249,8 +430,7 @@ class AgentTools:
         """
         基于检索上下文流式回答问题，逐块yield文本增量
         """
-        provider = provider or self.config.llm.provider
-        api = APIProcessor(provider=provider)
+        api = APIProcessor(provider=provider) if provider else self._api
 
         user_prompt = KNOWLEDGE_QA_USER.format(context=context, question=question)
 
@@ -259,6 +439,8 @@ class AgentTools:
             temperature=0.3,
             system_content=KNOWLEDGE_QA_SYSTEM,
             human_content=user_prompt,
+            # 问答是轻任务，关闭thinking避免首token被隐藏思考阶段阻塞（实测 11s->0.6s）
+            enable_thinking=False,
         )
 
     def generate_resume(
@@ -271,8 +453,7 @@ class AgentTools:
         """
         调用LLM生成简历
         """
-        provider = provider or self.config.llm.provider
-        api = APIProcessor(provider=provider)
+        api = APIProcessor(provider=provider) if provider else self._api
 
         job_section = ""
         if job_requirement:
@@ -307,8 +488,7 @@ class AgentTools:
         """
         根据岗位要求优化简历
         """
-        provider = provider or self.config.llm.provider
-        api = APIProcessor(provider=provider)
+        api = APIProcessor(provider=provider) if provider else self._api
 
         user_prompt = RESUME_OPTIMIZE_USER.format(
             resume=resume,

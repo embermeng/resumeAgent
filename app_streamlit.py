@@ -1,10 +1,15 @@
 """
 Streamlit Web UI - ResumeAgent
 """
+import logging
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
+
+# 日志输出到控制台（含各阶段耗时统计），屏蔽httpx请求日志噪音
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 import streamlit as st
 from src.config import get_config

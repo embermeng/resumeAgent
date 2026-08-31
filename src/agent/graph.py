@@ -3,6 +3,7 @@ LangGraph Agent主图定义
 双模式路由：quick_response / deep_thinking / chitchat
 """
 import logging
+import time
 from typing import Dict, Any
 
 from langgraph.graph import StateGraph, END
@@ -103,10 +104,19 @@ class ResumeAgent:
         if project_name:
             category = "project"
 
+        t0 = time.time()
         knowledge = self.tools.search_knowledge(query, category=category)
+        retrieval_elapsed = time.time() - t0
 
         # 直接回答
+        t0 = time.time()
         response = self.tools.answer_question(user_input, knowledge)
+        answer_elapsed = time.time() - t0
+
+        _log.info(
+            f"[快速回答] 耗时统计 - 检索: {retrieval_elapsed:.2f}s | "
+            f"回答生成: {answer_elapsed:.2f}s | 合计: {retrieval_elapsed + answer_elapsed:.2f}s"
+        )
 
         return {
             "retrieved_knowledge": knowledge,
@@ -125,7 +135,10 @@ class ResumeAgent:
 
         # 分层检索：LLM根据课程目录选高价值知识点 -> 定向检索对应课程；失败降级为普通混合检索
         knowledge = self._hierarchical_search(user_input, job_requirement)
-        projects = self.tools.search_projects(user_input, top_n=5)
+        # 项目素材：优先用预写好的项目介绍成品，无介绍文档时降级检索亮点分块
+        projects = self.tools.select_project_intros(user_input, job_requirement)
+        if not projects:
+            projects = self.tools.search_projects(user_input, top_n=5)
 
         # 生成简历草稿
         resume_draft = self.tools.generate_resume(
@@ -175,6 +188,7 @@ class ResumeAgent:
                 temperature=0.7,
                 system_content=CHITCHAT_SYSTEM,
                 human_content=user_input,
+                enable_thinking=False,
             )
             if isinstance(result, dict):
                 response = result.get("content", str(result))
@@ -222,8 +236,11 @@ class ResumeAgent:
             {"type": "done", ...}            结束，携带intent/final_response等完整结果
         """
         # Step 1: 意图识别
+        t_start = time.time()
         yield {"type": "status", "text": "正在识别意图..."}
+        t0 = time.time()
         result = self.intent_classifier.classify(user_input)
+        intent_elapsed = time.time() - t0
         intent = result.intent.value
         entities = result.entities
         has_job = bool(entities.get("job_title")) or any(
@@ -238,15 +255,31 @@ class ResumeAgent:
             category = "project" if entities.get("project_name") else None
 
             yield {"type": "status", "text": "正在检索知识库..."}
+            t0 = time.time()
             knowledge = self.tools.search_knowledge(query, category=category)
+            retrieval_elapsed = time.time() - t0
 
             yield {"type": "status", "text": "正在生成回答..."}
+            first_token_elapsed = None
+            total_chars = 0
+            t0 = time.time()
             try:
                 for chunk in self.tools.answer_question_stream(user_input, knowledge):
+                    if first_token_elapsed is None:
+                        first_token_elapsed = time.time() - t0
+                    total_chars += len(chunk)
                     yield {"type": "token", "text": chunk}
             except Exception as e:
                 _log.error(f"流式回答失败: {e}")
                 yield {"type": "token", "text": f"抱歉，回答问题时出现错误: {e}"}
+            generation_elapsed = time.time() - t0
+
+            _log.info(
+                f"[快速回答] 耗时统计 - 意图识别: {intent_elapsed:.2f}s | "
+                f"检索: {retrieval_elapsed:.2f}s | 首token: {first_token_elapsed:.2f}s | "
+                f"生成: {generation_elapsed:.2f}s({total_chars}字) | "
+                f"全链路: {time.time() - t_start:.2f}s"
+            )
 
             yield {"type": "done", "intent": intent, "step": "quick_response_done",
                    "retrieved_knowledge": knowledge}
@@ -258,8 +291,10 @@ class ResumeAgent:
             yield {"type": "status", "text": "正在分析课程目录，挑选高价值知识点..."}
             knowledge = self._hierarchical_search(user_input, job_requirement)
 
-            yield {"type": "status", "text": "正在检索项目经历..."}
-            projects = self.tools.search_projects(user_input, top_n=5)
+            yield {"type": "status", "text": "正在挑选项目介绍..."}
+            projects = self.tools.select_project_intros(user_input, job_requirement)
+            if not projects:
+                projects = self.tools.search_projects(user_input, top_n=5)
 
             yield {"type": "status", "text": "正在生成简历草稿（耗时较长，请稍候）..."}
             resume_draft = self.tools.generate_resume(
@@ -284,6 +319,7 @@ class ResumeAgent:
                     temperature=0.7,
                     system_content=CHITCHAT_SYSTEM,
                     human_content=user_input,
+                    enable_thinking=False,
                 ):
                     yield {"type": "token", "text": chunk}
             except Exception as e:

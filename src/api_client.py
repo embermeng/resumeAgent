@@ -48,6 +48,7 @@ class BaseDashscopeProcessor:
         human_content: str = "Hello!",
         is_structured: bool = False,
         response_format: Optional[Type[BaseModel]] = None,
+        enable_thinking: Optional[bool] = None,
         **kwargs,
     ) -> dict:
         if model is None:
@@ -59,12 +60,19 @@ class BaseDashscopeProcessor:
         if human_content:
             messages.append({"role": "user", "content": human_content})
 
+        # qwen3系列是混合思考模型，thinking默认开启；意图识别/问答等轻任务
+        # 关闭thinking可大幅降低延迟（实测非流式 13s->1.7s）
+        create_kwargs = {}
+        if enable_thinking is not None:
+            create_kwargs["extra_body"] = {"enable_thinking": enable_thinking}
+
         # API错误（如403无权限、429限流）立即抛出，避免把错误响应当成正常内容吞掉
         try:
             completion = self.llm.chat.completions.create(
                 model=model,
                 temperature=temperature,
                 messages=messages,
+                **create_kwargs,
             )
         except Exception as e:
             status = getattr(e, "status_code", None)
@@ -94,6 +102,7 @@ class BaseDashscopeProcessor:
         temperature: float = 0.5,
         system_content: str = "You are a helpful assistant.",
         human_content: str = "Hello!",
+        enable_thinking: Optional[bool] = None,
         **kwargs,
     ):
         """流式发送消息，逐块yield文本增量（SSE效果的数据源）"""
@@ -106,12 +115,18 @@ class BaseDashscopeProcessor:
         if human_content:
             messages.append({"role": "user", "content": human_content})
 
+        # 关闭thinking后首token不再被隐藏思考阶段阻塞（实测 11s->0.6s）
+        create_kwargs = {}
+        if enable_thinking is not None:
+            create_kwargs["extra_body"] = {"enable_thinking": enable_thinking}
+
         try:
             stream = self.llm.chat.completions.create(
                 model=model,
                 temperature=temperature,
                 messages=messages,
                 stream=True,
+                **create_kwargs,
             )
             for chunk in stream:
                 if chunk.choices and chunk.choices[0].delta.content:
@@ -159,6 +174,18 @@ class BaseDashscopeProcessor:
             if first_nl > 0 and last_bc > first_nl:
                 content = content[first_nl + 1:last_bc].strip()
         return json.loads(content)
+
+    def get_embedding(self, text: str, model: str = None) -> list:
+        """获取文本embedding向量
+        复用兼容端点客户端的连接池（TLS长连接），避免每次新建连接；
+        实测复用后单次调用 4s -> 0.1s
+        """
+        model = model or "text-embedding-v1"
+        rsp = self.llm.embeddings.create(input=[text], model=model)
+        emb = rsp.data[0].embedding
+        if not emb:
+            raise RuntimeError(f"DashScope embedding为空, text={text[:20]}")
+        return emb
 
 
 class BaseOpenaiProcessor:
@@ -407,9 +434,12 @@ class APIProcessor:
         provider = provider or os.getenv("EMBEDDING_PROVIDER", "dashscope")
 
         if provider == "dashscope":
+            # 走处理器自身的兼容端点客户端，连接池保持TLS长连接（每次新建客户端会慢数秒）
+            if isinstance(self.processor, BaseDashscopeProcessor):
+                return self.processor.get_embedding(text, model=model)
+            model = model or "text-embedding-v1"
             import dashscope
             dashscope.api_key = os.getenv("DASHSCOPE_API_KEY")
-            model = model or "text-embedding-v1"
             rsp = dashscope.TextEmbedding.call(model=model, input=[text])
             if "output" in rsp and "embeddings" in rsp["output"]:
                 emb = rsp["output"]["embeddings"][0]

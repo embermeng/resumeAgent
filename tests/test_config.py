@@ -26,20 +26,10 @@ class TestPathConfig:
         pc = PathConfig(root_path=Path("/fake/root"))
         assert pc.course_pdfs_dir == Path("/fake/root/data/knowledge_base/course_pdfs")
 
-    def test_project_sources_dir(self):
-        from src.config import PathConfig
-        pc = PathConfig(root_path=Path("/fake/root"))
-        assert pc.project_sources_dir == Path("/fake/root/data/knowledge_base/project_sources")
-
     def test_course_chunks_dir(self):
         from src.config import PathConfig
         pc = PathConfig(root_path=Path("/fake/root"))
         assert pc.course_chunks_dir == Path("/fake/root/data/processed/course_chunks")
-
-    def test_project_extracts_dir(self):
-        from src.config import PathConfig
-        pc = PathConfig(root_path=Path("/fake/root"))
-        assert pc.project_extracts_dir == Path("/fake/root/data/processed/project_extracts")
 
     def test_vector_dbs_dir(self):
         from src.config import PathConfig
@@ -56,7 +46,7 @@ class TestPathConfig:
         pc = PathConfig(root_path=tmp_path)
         pc.ensure_dirs()
         assert pc.course_pdfs_dir.exists()
-        assert pc.project_sources_dir.exists()
+        assert pc.project_highlights_dir.exists()
         assert pc.course_chunks_dir.exists()
         assert pc.vector_dbs_dir.exists()
 

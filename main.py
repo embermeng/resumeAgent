@@ -1,11 +1,11 @@
 """
-CLI入口 - 知识库构建、项目提炼等批处理命令
+CLI入口 - 知识库构建等批处理命令
 用法:
     python main.py parse-pdfs          # 解析PDF为Markdown
     python main.py extract-summaries   # 提取课程结构化摘要与目录
     python main.py split-chunks        # 文本分块
     python main.py build-indexes       # 构建向量/BM25索引
-    python main.py extract-projects    # 提炼项目精华
+    python main.py ingest-highlights   # 项目亮点文档入库（category=project）
     python main.py build-all           # 一键构建完整知识库
     python main.py chat                # CLI交互模式（测试Agent）
 """
@@ -137,25 +137,25 @@ def cmd_build_indexes(args):
     _log.info("索引构建完成")
 
 
-def cmd_extract_projects(args):
-    """提炼项目精华"""
-    from src.knowledge.project_extractor import ProjectExtractor
+def cmd_ingest_highlights(args):
+    """项目亮点文档入库：md -> category=project分块，写入course_chunks待建索引"""
+    from src.knowledge.highlight_ingestor import HighlightIngestor
 
     config = get_config()
-    projects_dir = config.paths.project_sources_dir
-    output_dir = config.paths.project_extracts_dir
+    highlights_dir = config.paths.project_highlights_dir
 
-    if not projects_dir.exists() or not list(projects_dir.iterdir()):
-        _log.warning(f"项目目录为空: {projects_dir}，请先放入项目源码")
+    if not highlights_dir.exists() or not list(highlights_dir.glob("*.md")):
+        _log.warning(f"项目亮点目录为空: {highlights_dir}，请先放入项目亮点README（.md）")
         return
 
-    _log.info(f"开始提炼项目精华: {projects_dir}")
-    extractor = ProjectExtractor(
-        provider=config.llm.provider,
-        model=config.llm.model,
+    _log.info(f"开始入库项目亮点文档: {highlights_dir}")
+    ingestor = HighlightIngestor()
+    ingestor.ingest(
+        highlights_dir,
+        config.paths.course_chunks_dir,
+        force=getattr(args, "force", False),
     )
-    results = extractor.extract_batch(projects_dir, output_dir=output_dir)
-    _log.info(f"提炼完成，共处理 {len(results)} 个项目")
+    _log.info("入库完成，请运行 build-indexes 建立索引")
 
 
 def cmd_build_all(args):
@@ -176,15 +176,15 @@ def cmd_build_all(args):
     _log.info("[3/5] 文本分块...")
     cmd_split_chunks(args)
 
-    # Step 4: 构建索引
-    _log.info("[4/5] 构建索引...")
+    # Step 4: 项目亮点文档入库（与课程分块合并建索引）
+    _log.info("[4/5] 项目亮点文档入库...")
+    cmd_ingest_highlights(args)
+
+    # Step 5: 构建索引
+    _log.info("[5/5] 构建索引...")
     args.bm25 = True
     args.vector = True
     cmd_build_indexes(args)
-
-    # Step 5: 提炼项目
-    _log.info("[5/5] 提炼项目精华...")
-    cmd_extract_projects(args)
 
     _log.info("=" * 50)
     _log.info("知识库构建完成！")
@@ -250,8 +250,12 @@ def main():
     sp_idx.add_argument("--force", action="store_true", help="强制全量重建所有索引")
     sp_idx.add_argument("--prune", action="store_true", help="清理孤儿索引（对应文档已删除/改名）")
 
-    # extract-projects
-    subparsers.add_parser("extract-projects", help="提炼项目精华")
+    # ingest-highlights
+    sp_hl = subparsers.add_parser(
+        "ingest-highlights",
+        help="项目亮点文档入库（增量，读取project_highlights目录的md）",
+    )
+    sp_hl.add_argument("--force", action="store_true", help="强制全量重新入库所有亮点文档")
 
     # build-all
     sp_all = subparsers.add_parser("build-all", help="一键构建完整知识库（各环节均为增量）")
@@ -274,7 +278,7 @@ def main():
         "extract-summaries": cmd_extract_summaries,
         "split-chunks": cmd_split_chunks,
         "build-indexes": cmd_build_indexes,
-        "extract-projects": cmd_extract_projects,
+        "ingest-highlights": cmd_ingest_highlights,
         "build-all": cmd_build_all,
         "chat": cmd_chat,
     }

@@ -136,6 +136,33 @@ class TestBaseDashscopeProcessor:
         with pytest.raises(RuntimeError, match="429"):
             list(proc.send_message_stream(human_content="hi"))
 
+    def test_enable_thinking_false_passed(self):
+        """enable_thinking=False应通过extra_body传递给兼容端点（轻任务降延迟）"""
+        proc = self._make_proc()
+        proc.llm.chat.completions.create.return_value = self._make_mock_completion("ok")
+
+        proc.send_message(human_content="hi", enable_thinking=False)
+        call_kwargs = proc.llm.chat.completions.create.call_args.kwargs
+        assert call_kwargs["extra_body"] == {"enable_thinking": False}
+
+    def test_enable_thinking_default_not_passed(self):
+        """默认不传enable_thinking（保持模型默认行为，深思任务需要thinking）"""
+        proc = self._make_proc()
+        proc.llm.chat.completions.create.return_value = self._make_mock_completion("ok")
+
+        proc.send_message(human_content="hi")
+        call_kwargs = proc.llm.chat.completions.create.call_args.kwargs
+        assert "extra_body" not in call_kwargs
+
+    def test_enable_thinking_false_in_stream(self):
+        """流式调用同样支持关闭thinking"""
+        proc = self._make_proc()
+        proc.llm.chat.completions.create.return_value = iter([])
+
+        list(proc.send_message_stream(human_content="hi", enable_thinking=False))
+        call_kwargs = proc.llm.chat.completions.create.call_args.kwargs
+        assert call_kwargs["extra_body"] == {"enable_thinking": False}
+
 
 class TestAPIProcessor:
     """统一API处理器测试"""

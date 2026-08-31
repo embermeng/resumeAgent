@@ -177,6 +177,20 @@ class TestBM25Retriever:
         for r in results:
             assert r["doc_id"] == "doc1"
 
+    def test_index_and_doc_cached(self, setup_bm25_env):
+        """索引/文档应带内存缓存：多次检索不重复反序列化（降低查询延迟）"""
+        docs_dir, bm25_dir = setup_bm25_env
+        retriever = BM25Retriever(bm25_dir, docs_dir)
+
+        real_load = pickle.load
+        with patch("src.retrieval.retriever.pickle.load", side_effect=real_load) as mock_load:
+            retriever.retrieve("RAG 向量检索", top_n=3)
+            retriever.retrieve("FAISS 余弦距离", top_n=3)
+            # 两个文档的pkl各只应加载一次
+            assert mock_load.call_count == 2
+        assert len(retriever._index_cache) == 2
+        assert len(retriever._doc_cache) == 2
+
     def test_retrieve_empty_result(self, setup_bm25_env):
         docs_dir, bm25_dir = setup_bm25_env
         retriever = BM25Retriever(bm25_dir, docs_dir)

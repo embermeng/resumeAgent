@@ -2,16 +2,17 @@
 
 基于 **LangGraph + RAG** 构建的双模式路由智能简历生成助手。
 
-将课程 PDF 和项目源码转化为知识库，通过 Agent 自动识别意图：技术问题快速回答，简历生成深度思考多步推理。
+将课程 PDF 和项目亮点文档转化为知识库，通过 Agent 自动识别意图：技术问题快速回答，简历生成深度思考多步推理。
 
 ---
 
 ## 功能概览
 
 - **知识库构建**：PDF 解析 → 文本分块 → 向量化入库（FAISS + BM25 双通道）
-- **项目精华提炼**：用 LLM 从项目源码/文档中提炼技术栈、亮点、贡献等结构化信息
+- **项目介绍文档管理**：用户离线生成的简历措辞成品直接放入目录，生成简历时遍历挑选、全文引用（主路径，不入库不向量化）
+- **项目亮点文档入库**：项目亮点 README 入库打上 `project` 类别标签，供项目知识问答与素材兜底
 - **智能问答**：基于知识库的技术知识问答（RAG）
-- **简历生成**：综合知识库 + 项目精华，自动生成/优化简历
+- **简历生成**：综合课程知识分块 + 项目介绍成品（无介绍文档时降级用亮点分块），自动生成/优化简历
 - **双模式路由**：Agent 自动判断意图，选择快速回答或深度思考路径
 
 ---
@@ -27,8 +28,9 @@ ResumeAgent/
 │
 ├── data/
 │   ├── knowledge_base/
-│   │   ├── course_pdfs/     # ← 放入课程 PDF 文件
-│   │   └── project_sources/ # ← 放入项目源码目录
+│   │   ├── course_pdfs/        # ← 放入课程 PDF 文件
+│   │   ├── project_intros/     # ← 放入项目介绍文档（.md，简历主路径）
+│   │   └── project_highlights/ # ← 放入项目亮点文档（.md，问答/兜底）
 │   ├── processed/           # 处理后的中间数据（自动生成）
 │   └── databases/           # 向量索引和 BM25 索引（自动生成）
 │
@@ -41,7 +43,7 @@ ResumeAgent/
 │   ├── prompts/             # 提示词模板
 │   └── schemas/             # 数据模型
 │
-├── tests/                   # 132 个测试用例
+├── tests/                   # 215 个测试用例
 └── docs/                    # 设计文档与报告
 ```
 
@@ -96,25 +98,29 @@ data/knowledge_base/course_pdfs/
 └── ...
 ```
 
-#### 3.2 放入项目源码（可选）
+#### 3.2 放入项目介绍文档（简历主路径，推荐）
 
-将你的项目源码目录放到 `data/knowledge_base/project_sources/`，每个项目一个子目录：
+项目介绍是**简历措辞成品**：你用提示词+大模型离线生成，一个项目一份，**放入目录即生效，无需任何构建命令**：
 
-```
-data/knowledge_base/project_sources/
-├── my-rag-project/
-│   ├── README.md
-│   ├── requirements.txt
-│   ├── src/
-│   └── ...
-├── my-web-app/
-│   ├── README.md
-│   ├── package.json
-│   └── ...
-└── ...
-```
+1. 用 [`src/prompts/生成项目介绍.md`](src/prompts/生成项目介绍.md) 中的提示词，把项目材料（亮点文档/源码说明）改写成简历项目介绍（需有 `# 项目名` 一级标题和 `## 一句话简介` 章节）
+2. 将 `.md` 放入 `data/knowledge_base/project_intros/`
+3. （可选）必上简历的项目在一级标题后加一行 `> 标签：简历优先`
+4. 直接去生成简历，无需入库/建索引（改文档后同样即时生效）
 
-> 每个项目目录中建议包含 `README.md` 和依赖文件（如 `requirements.txt`），Agent 会优先读取这些文件来提炼项目信息。
+生成简历时深思路径会遍历该目录：文档数 **≤6 份时全部使用**；超过时 LLM 根据“项目名+一句话简介”轻量目录按诉求/岗位挑选（标签项目必选且排前，挑选失败自动兜底）。入选文档全文直接进简历生成上下文，项目经历部分无需现场措辞，更快且措辞稳定。
+
+#### 3.3 放入项目亮点文档（知识问答与兜底）
+
+**用提示词把每个项目总结成一份亮点文档再入库**（内容可控、无 API 成本）：
+
+1. 用 [`src/prompts/总结项目亮点.md`](src/prompts/总结项目亮点.md) 中的提示词，让 AI 把每个项目总结成一份亮点 README（含技术栈、亮点、量化成果等固定章节）
+2. 将生成的 `.md` 文件放入 `data/knowledge_base/project_highlights/`（一个项目一份，文档需有 `# 项目名` 一级标题）
+3. （可选）给重点项目打标签：在一级标题后加一行 `> 标签：简历优先`（多个标签用、/,分隔）
+4. 运行 `python main.py ingest-highlights` 入库，再 `build-indexes` 建索引（或直接 `build-all`）
+
+入库时文档会按章节分块并打上 `category="project"` 标签，与课程知识区分开；用于项目相关的快速问答（如“我这个项目用了什么技术栈”），并在未放项目介绍文档时作为简历生成的兜底素材。后续也支持网页上传到该目录，入库流程不变。
+
+**优先标签的作用**：打了 `简历优先` 标签的项目在检索项目素材时被定向保证入选（每个标签项目至少一块、轮询交错排序靠前），剩余名额才由其余项目按相关度竞争。想让某个项目上简历，给它加这行标签再重跑入库即可；改标签后无需重建全部索引，只有变更文档会增量重建。项目介绍文档（3.2）沿用同一标签约定（必选项目）。
 
 ---
 
@@ -128,9 +134,10 @@ python main.py build-all
 
 这条命令会自动完成以下全部步骤：
 1. 解析 PDF → Markdown
-2. 文本分块（按 token 数切分）
-3. 构建 FAISS 向量索引 + BM25 索引
-4. 用 LLM 提炼项目精华
+2. 提取课程摘要目录（分层检索用）
+3. 文本分块（按 token 数切分）
+4. 项目亮点文档入库（`project_highlights/` 下的 md，打 `project` 标签）
+5. 构建 FAISS 向量索引 + BM25 索引（课程与项目亮点合并建索引）
 
 ### 方式二：分步执行
 
@@ -144,16 +151,16 @@ python main.py parse-pdfs
 python main.py split-chunks
 python main.py split-chunks --chunk-size 500 --chunk-overlap 100  # 自定义参数
 
-# 第 3 步：构建向量索引和 BM25 索引
-python main.py build-indexes
+# 第 3 步：项目亮点文档入库（需已放入 project_highlights/）
+python main.py ingest-highlights
 
-# 第 4 步：提炼项目精华（需要已放入项目源码）
-python main.py extract-projects
+# 第 4 步：构建向量索引和 BM25 索引
+python main.py build-indexes
 ```
 
 ### 增量构建机制
 
-以上各环节（解析、分块、索引构建）默认都是**增量执行**：
+以上各环节（解析、分块、亮点入库、索引构建）默认都是**增量执行**：
 
 - 已解析/已分块/已建索引的文档会自动跳过，只处理新增文档
 - 源文档更新过（如用 `--force` 重新解析）时，下游分块和索引会自动感知并重建
@@ -179,15 +186,14 @@ python main.py build-all --prune
 
 ```
 data/processed/
-├── course_chunks/       # 课程知识分块（JSON）
-└── project_extracts/    # 项目精华提炼结果（JSON）
+└── course_chunks/       # 知识分块（课程 + 项目亮点，按 metainfo.category 区分）
 
 data/databases/
-├── vector_dbs/          # FAISS 向量索引
+├── vector_dbs/          # FAISS 向量索引（项目文档的 doc_id 带 project- 前缀）
 └── bm25_dbs/            # BM25 全文检索索引
 ```
 
-> **提示**：`data/processed/project_extracts/` 中的项目精华 JSON 可以手动编辑修改，确保简历中展示的项目信息准确。
+> **提示**：简历生成使用的项目素材是 `course_chunks/` 中 `category="project"` 的亮点分块（由 `project_highlights/` 的 md 入库而来），可随时编辑后重跑 `ingest-highlights` + `build-indexes` 增量生效。
 
 ---
 
@@ -211,7 +217,7 @@ streamlit run app_streamlit.py
 |---------|-----------|
 | "RAG 的核心流程是什么？" | ⚡ 快速回答模式 → 从知识库检索并回答 |
 | "Faiss 和 Milvus 有什么区别？" | ⚡ 快速回答模式 → 知识对比回答 |
-| "我这个 RAG 项目用了什么技术栈？" | ⚡ 快速回答模式 → 查询项目精华 |
+| "我这个 RAG 项目用了什么技术栈？" | ⚡ 快速回答模式 → 检索项目亮点分块 |
 | "帮我生成一份简历" | 🧠 深度思考模式 → 检索知识 + 项目 → 生成简历 |
 | "帮我生成一份 AI 工程师方向的简历，岗位要求如下..." | 🧠 深度思考模式 → 针对性生成 + 优化 |
 
@@ -318,19 +324,20 @@ pytest tests/test_knowledge/ -v
 - 确认 PDF 文件不是扫描件（扫描件需启用 OCR）
 - 检查 PDF 是否加密
 
-**Q: 项目精华提炼结果不准确？**
+**Q: 项目经历素材不准确？**
 
-提炼完成后，打开 `data/processed/project_extracts/` 目录，手动编辑 JSON 文件即可。Agent 在生成简历时会读取这些 JSON 作为项目信息。
+简历生成的项目素材优先来自 `data/knowledge_base/project_intros/` 下的项目介绍成品，直接编辑对应 `.md` 即时生效（无需任何构建命令）。若未放介绍文档，则降级用 `project_highlights/` 亮点文档的分块（编辑后重跑 `ingest-highlights` + `build-indexes` 增量生效）。
 
 **Q: 如何更新知识库？**
 
-放入新 PDF 后重新运行 `python main.py build-all` 即可。各环节默认增量执行，只处理新增/更新过的文档；如需全量重建加 `--force`，删除过 PDF 后加 `--prune` 清理孤儿索引。
+放入新 PDF 或新项目亮点文档后重新运行 `python main.py build-all` 即可。各环节默认增量执行，只处理新增/更新过的文档；如需全量重建加 `--force`，删除过文档后加 `--prune` 清理孤儿索引。注意：删除 `project_highlights/` 里的文档后，需手动删除 `course_chunks/` 中对应的 `project-*.json` 再 `--prune`。
 
 **Q: 支持哪些知识来源？**
 
 目前支持：
 - 课程 PDF（`data/knowledge_base/course_pdfs/`）
-- 项目源码（`data/knowledge_base/project_sources/`）
+- 项目介绍文档（`data/knowledge_base/project_intros/`，简历主路径，放入即用）
+- 项目亮点文档（`data/knowledge_base/project_highlights/`，知识问答与兜底，用提示词生成）
 - 面试题资料（`data/knowledge_base/interview_qa/`，后续扩展）
 
 ---
@@ -345,7 +352,7 @@ pytest tests/test_knowledge/ -v
 - **Token 计数**：tiktoken
 - **数据模型**：Pydantic v2
 - **Web UI**：Streamlit
-- **测试**：pytest（132 个测试用例）
+- **测试**：pytest（215 个测试用例）
 
 ---
 

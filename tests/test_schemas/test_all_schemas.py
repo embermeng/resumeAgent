@@ -4,7 +4,7 @@ schemas 数据模型单元测试
 import json
 import pytest
 from src.schemas.knowledge import KnowledgeChunk, KnowledgeDocument
-from src.schemas.project import ProjectExtract, ProjectInResume
+from src.schemas.project import ProjectInResume
 from src.schemas.resume import Resume, EducationItem
 
 
@@ -75,52 +75,6 @@ class TestKnowledgeDocument:
             doc_id="doc_002", source="test", category="project"
         )
         assert doc.chunks == []
-
-
-class TestProjectExtract:
-    """项目精华模型测试"""
-
-    def test_create_valid_project(self):
-        proj = ProjectExtract(
-            project_name="RAG知识库系统",
-            description="基于RAG的企业知识库问答系统",
-            tech_stack=["Python", "LangChain", "FAISS"],
-            highlights=["混合检索", "LLM重排序"],
-            role_contribution="独立完成开发",
-            key_metrics="检索准确率提升30%",
-        )
-        assert proj.project_name == "RAG知识库系统"
-        assert len(proj.tech_stack) == 3
-        assert len(proj.highlights) == 2
-
-    def test_required_fields(self):
-        with pytest.raises(Exception):
-            ProjectExtract(
-                project_name="test",
-                # 缺少 description, tech_stack, highlights
-            )
-
-    def test_default_optional_fields(self):
-        proj = ProjectExtract(
-            project_name="test",
-            description="desc",
-            tech_stack=["Python"],
-            highlights=["h1"],
-        )
-        assert proj.role_contribution == ""
-        assert proj.key_metrics == ""
-
-    def test_json_roundtrip(self):
-        proj = ProjectExtract(
-            project_name="test_proj",
-            description="测试项目",
-            tech_stack=["Python", "Pytest"],
-            highlights=["亮点1"],
-        )
-        json_str = proj.model_dump_json()
-        restored = ProjectExtract.model_validate_json(json_str)
-        assert restored.project_name == "test_proj"
-        assert restored.tech_stack == ["Python", "Pytest"]
 
 
 class TestProjectInResume:

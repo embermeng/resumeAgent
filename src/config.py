@@ -29,8 +29,14 @@ class PathConfig:
         return self.knowledge_base_dir / "course_pdfs"
 
     @property
-    def project_sources_dir(self) -> Path:
-        return self.knowledge_base_dir / "project_sources"
+    def project_highlights_dir(self) -> Path:
+        """项目亮点文档目录（用户用提示词生成的项目亮点README，手动放入/网页上传）"""
+        return self.knowledge_base_dir / "project_highlights"
+
+    @property
+    def project_intros_dir(self) -> Path:
+        """项目介绍文档目录（简历措辞成品，一个项目一份，生成简历时直接引用，不入库不向量化）"""
+        return self.knowledge_base_dir / "project_intros"
 
     @property
     def interview_qa_dir(self) -> Path:
@@ -44,10 +50,6 @@ class PathConfig:
     @property
     def course_chunks_dir(self) -> Path:
         return self.processed_dir / "course_chunks"
-
-    @property
-    def project_extracts_dir(self) -> Path:
-        return self.processed_dir / "project_extracts"
 
     @property
     def interview_chunks_dir(self) -> Path:
@@ -78,10 +80,10 @@ class PathConfig:
         """确保所有数据目录存在"""
         for dir_path in [
             self.course_pdfs_dir,
-            self.project_sources_dir,
+            self.project_highlights_dir,
+            self.project_intros_dir,
             self.interview_qa_dir,
             self.course_chunks_dir,
-            self.project_extracts_dir,
             self.interview_chunks_dir,
             self.course_summaries_dir,
             self.vector_dbs_dir,

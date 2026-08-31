@@ -54,6 +54,8 @@ class IntentClassifier:
                 human_content=user_prompt,
                 is_structured=True,
                 response_format=IntentResult,
+                # 分类是轻任务，关闭thinking避免隐藏思考阶段拖慢首响应（实测 6s->1.7s）
+                enable_thinking=False,
             )
 
             if isinstance(result, dict):
