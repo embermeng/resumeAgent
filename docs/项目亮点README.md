@@ -2,26 +2,26 @@
 
 ## 一句话简介
 
-ResumeAgent 是一个面向个人求职场景的智能简历生成 Agent，基于 LangGraph 状态机实现双模式路由（快速问答/深度思考），通过 FAISS + BM25 混合检索从课程 PDF 和项目亮点文档构建的知识库中检索相关知识，简历生成时优先挑选预写好的项目介绍成品文档（无介绍时降级检索项目亮点分块），自动生成针对特定岗位要求的定制化简历。
+ResumeAgent 是一个面向个人求职场景的智能简历生成 Agent，基于 LangGraph 状态机实现双模式路由（快速问答/深度思考），通过 FAISS + BM25 混合检索从课程 PDF 和项目亮点文档构建的知识库中检索相关知识，简历生成时优先挑选预写好的项目介绍成品文档（无介绍时降级检索项目亮点分块），自动生成针对特定岗位要求的定制化简历；支持基于上传的已有简历增强生成，沿用其章节结构与字段格式。
 
 ## 技术栈
 
-LangGraph（Agent 状态机编排）、LangChain（LLM 工具链）、FAISS（Facebook AI Similarity Search，向量数据库）、BM25（Best Matching 25，全文检索）、rank-bm25（BM25 Python 实现）、jieba（中文分词）、MinerU（GPU 加速 PDF 解析）、DashScope（通义千问 API）、tiktoken（Token 计数）、Pydantic v2（数据模型校验）、Streamlit（Web UI）、pytest（单元测试框架）
+LangGraph（Agent 状态机编排）、LangChain（LLM 工具链）、FAISS（Facebook AI Similarity Search，向量数据库）、BM25（Best Matching 25，全文检索）、rank-bm25（BM25 Python 实现）、jieba（中文分词）、MinerU（GPU 加速 PDF 解析）、DashScope（通义千问 API）、tiktoken（Token 计数）、Pydantic v2（数据模型校验）、Streamlit（Web UI）、python-docx（上传 Word 简历解析）、pytest（单元测试框架）
 
 ## 架构设计
 
-ResumeAgent 采用分层模块化架构，数据流为：课程 PDF/项目亮点文档 → 知识处理层 → 索引层 → 检索层 → Agent 层 → UI 层；项目介绍成品文档独立存放、不入库，生成简历时直接遍历挑选。
+ResumeAgent 采用分层模块化架构，数据流为：课程 PDF/项目亮点文档 → 知识处理层 → 索引层 → 检索层 → Agent 层 → UI 层；项目介绍成品文档独立存放、不入库，生成简历时直接遍历挑选；上传的已有简历经解析后作为生成时的事实骨架。
 
-- **知识处理层**（`src/knowledge/`）：PDFParser（MinerU GPU 解析）、TextSplitter（tiktoken 按 token 数分块）、CourseSummarizer（LLM 提取课程摘要）、HighlightIngestor（项目亮点 README 入库，category=project，支持 `简历优先` 标签解析）、IntroSelector（项目介绍文档扫描与目录构建，生成简历时挑选）、BM25Ingestor + VectorDBIngestor（双通道索引构建）
+- **知识处理层**（`src/knowledge/`）：PDFParser（MinerU GPU 解析）、TextSplitter（tiktoken 按 token 数分块）、CourseSummarizer（LLM 提取课程摘要）、HighlightIngestor（项目亮点 README 入库，category=project，支持 `简历优先` 标签解析）、IntroSelector（项目介绍文档扫描与目录构建，生成简历时挑选）、ResumeFileParser（上传已有简历按 docx/pdf/md/txt 类型分流解析，手工排版加粗章节行识别为标题）、BM25Ingestor + VectorDBIngestor（双通道索引构建）
 - **检索层**（`src/retrieval/`）：BM25Retriever（关键词匹配）、VectorRetriever（语义向量检索）、HybridRetriever（加权融合，vector_weight=0.6）、LLMReranker（LLM 重排序，预留模块）
 - **Agent 层**（`src/agent/`）：IntentClassifier（LLM 结构化输出意图分类）、ResumeAgent（LangGraph StateGraph 双模式路由：quick_response → 单次检索回答；deep_thinking → 分层检索 + 草稿生成 + 岗位优化）、AgentTools（知识检索、简历生成、简历优化工具集）
 - **配置层**（`src/config.py`）：全局路径、模型参数、环境变量统一管理
-- **UI 层**：Streamlit Web UI（流式输出 + 简历下载）与 CLI 交互模式
+- **UI 层**：Streamlit Web UI（流式输出 + 已有简历上传 + 简历 Markdown 下载）与 CLI 交互模式
 
 数据流关键路径：
 1. 知识入库：PDF → MinerU 解析 → tiktoken 分块 → Embedding 向量化 → FAISS/BM25 双通道索引
 2. 意图路由：用户输入 → LLM 意图分类 → 条件边路由到 quick_response/deep_thinking/chitchat
-3. 深思路径：课程目录选点 → 定向检索 → 项目介绍挑选（无介绍文档时降级检索项目亮点分块）→ 简历草稿生成 → 按 JD 优化
+3. 深思路径：课程目录选点 → 定向检索 → 项目介绍挑选（无介绍文档时降级检索项目亮点分块）→ 简历草稿生成（有已有简历时沿用其章节结构增强）→ 按 JD 优化
 
 ## 核心功能
 
@@ -32,6 +32,7 @@ ResumeAgent 采用分层模块化架构，数据流为：课程 PDF/项目亮点
 - **混合检索**：BM25 关键词 + 向量语义加权融合，异常时自动降级为纯 BM25
 - **分层检索**：深思路径下 LLM 先浏览课程目录选高价值知识点，再定向检索对应课程
 - **简历生成与优化**：综合知识检索 + 项目经历，按目标岗位要求自动生成并优化简历
+- **基于已有简历生成**：侧边栏上传 .docx/.pdf/.md/.txt（按类型分流解析：python-docx/MinerU/直接解码），已有简历作为事实骨架、沿用其章节结构与字段格式输出，保留个人信息/教育/工作经历等真实信息，用知识库素材增强措辞
 - **流式输出**：四层流式链路（API→Agent→UI），用户秒见进度、逐字输出
 - **多模型支持**：通过环境变量切换 DashScope/OpenAI/Gemini 三类 LLM 提供商
 
@@ -51,12 +52,14 @@ ResumeAgent 采用分层模块化架构，数据流为：课程 PDF/项目亮点
 
 **项目介绍文档零构建挑选**：每次生成简历都现场措辞项目经历，耗时长且措辞不稳定。将项目介绍改为离线预写成品：一个项目一份 `.md`（H1 项目名 + 一句话简介 + 亮点），放入目录即生效，不入库不向量化。挑选策略分三层：标签项目必选且排前；文档数 ≤6 时全选，零 LLM 调用；超过时一次 LLM 调用按"项目名+一句话简介"轻量目录挑选（结构化输出、过滤编造项目名、失败自动兜底为标签+顺序选取）。入选文档全文直接进简历生成上下文，项目经历部分省去现场长生成，响应更快、措辞稳定可编辑。
 
+**基于已有简历的格式跟随生成**：直接从素材生成简历容易丢失用户真实事实（个人信息/教育/工作经历）且输出结构漂移。设计事实骨架机制：上传侧 ResumeFileParser 按扩展名分流解析（docx 用 python-docx 按 body 顺序提取段落表格、并将手工排版的加粗章节行识别为标题，pdf 复用 MinerU，md/txt utf-8→gbk 兜底解码），已有简历作为事实骨架进入生成 prompt，提取其标题行显式注入“严格沿用章节结构与顺序”约束，并要求章节内字段与条目格式（如工作经历“时间/公司/职位/工作内容”、项目经历“技术栈/项目描述/责任描述”）同样沿用、项目素材改写为该字段格式而非照搬素材文档结构；LLM 输出经开场白剥离后处理，保证简历正文纯净。链路完全向下兼容（不传已有简历时行为不变）。
+
 **分层检索策略（目录选点→定向检索）**：深思路径下直接混合检索容易召回大量低相关分块。设计两级检索策略：第一级 LLM 浏览全部课程结构化摘要目录，按"简历含金量"和岗位匹配度挑选高价值知识点；第二级按选中知识点定向检索对应课程（每门课公平分配名额、轮询交错合并），过滤 LLM 编造的不存在 doc_id。任一环节失败自动降级为普通混合检索，保证功能可用。
 
 ## 量化成果
 
 - 增量构建：新增 1 篇 PDF 的 Embedding API 成本从 ~28 次调用降为 1 次（成本降至 1/28）
-- 测试覆盖：215 个测试用例全部通过，覆盖知识处理、检索、Agent、配置、Schema 等模块
+- 测试覆盖：257 个测试用例全部通过，覆盖知识处理、检索、Agent、配置、Schema 等模块
 - 知识库规模：52 篇文档级索引（29 篇课程 PDF + 23 篇项目亮点），每篇独立 BM25 + FAISS 双索引
 - 流式优化：意图识别关闭 thinking 后首响应从 6s 降至 1.7s；问答关闭 thinking 后首 token 从 11s 降至 0.6s
 - 检索缓存：BM25 索引内存缓存避免重复反序列化，实测省约 0.4s/次查询
@@ -68,8 +71,9 @@ ResumeAgent 采用分层模块化架构，数据流为：课程 PDF/项目亮点
 - 排查并修复知识问答失效的三重根因（API 静默吞错、中文分词失效、FAISS 中文路径）
 - 主导 PDF 解析引擎从 Docling 到 MinerU 的迁移（保持接口零改动）
 - 实现四层流式输出架构并适配 Streamlit 增量渲染
-- 编写 215 个 pytest 测试用例（TDD 驱动开发）
+- 设计已有简历上传解析与格式跟随生成机制（事实骨架 + 章节/字段格式约束）
+- 编写 257 个 pytest 测试用例（TDD 驱动开发）
 
 ## 检索关键词
 
-ResumeAgent, 简历生成, RAG, 检索增强生成, LangGraph, Agent, FAISS, BM25, 混合检索, hybrid retrieval, 向量检索, 增量索引, incremental indexing, MinerU, PDF解析, 流式输出, streaming, 意图识别, intent classification, 分层检索, 知识库构建, Streamlit, LangChain, Pydantic, 双模式路由, 项目亮点入库, 优先标签加权检索, 项目介绍挑选
+ResumeAgent, 简历生成, RAG, 检索增强生成, LangGraph, Agent, FAISS, BM25, 混合检索, hybrid retrieval, 向量检索, 增量索引, incremental indexing, MinerU, PDF解析, 流式输出, streaming, 意图识别, intent classification, 分层检索, 知识库构建, Streamlit, LangChain, Pydantic, 双模式路由, 项目亮点入库, 优先标签加权检索, 项目介绍挑选, 已有简历生成, 格式跟随, python-docx

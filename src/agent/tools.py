@@ -4,6 +4,7 @@ Agent工具定义
 """
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Optional, Dict, List, Tuple
 
@@ -27,6 +28,43 @@ _log = logging.getLogger(__name__)
 
 # 介绍文档数量不超过该值时全部直接使用，省去一次LLM挑选调用
 INTRO_SMALL_COUNT = 6
+
+# 已有简历的Markdown标题行（提取章节结构，生成时按其顺序输出）
+_RESUME_SECTION_PATTERN = re.compile(r"^#{1,6}\s+(.+?)\s*$", re.MULTILINE)
+
+
+def extract_resume_sections(resume_text: str) -> List[str]:
+    """
+    提取已有简历的章节标题列表（Markdown标题行，去重保序）
+    无标题行（如纯txt简历）时返回空列表，由LLM自行从正文归纳结构
+    """
+    sections = []
+    for title in _RESUME_SECTION_PATTERN.findall(resume_text):
+        if title not in sections:
+            sections.append(title)
+    return sections
+
+
+# LLM开场白特征（如"以下是为您优化后的简历…"）与首个标题行
+_PREAMBLE_TRIGGER_PATTERN = re.compile(r"^(以下是|下面是|这是|您好|本次|这份|经过|根据您)")
+_FIRST_HEADING_PATTERN = re.compile(r"^#{1,6}\s+", re.MULTILINE)
+
+
+def strip_llm_preamble(text: str) -> str:
+    """
+    剥离LLM输出中混入简历正文前的开场白（导出兼容兜底，prompt已硬约束）
+    仅当首个标题行之前存在命中开场白特征的文本时才丢弃前缀，避免误删正常内容
+    """
+    if not text:
+        return text
+    match = _FIRST_HEADING_PATTERN.search(text)
+    if not match or match.start() == 0:
+        return text
+    preamble = text[:match.start()].strip()
+    if preamble and _PREAMBLE_TRIGGER_PATTERN.match(preamble):
+        _log.info(f"剥离LLM开场白: {len(preamble)}字")
+        return text[match.start():]
+    return text
 
 
 class AgentTools:
@@ -448,10 +486,12 @@ class AgentTools:
         knowledge: str,
         projects: str,
         job_requirement: str = None,
+        existing_resume: str = None,
         provider: str = None,
     ) -> str:
         """
         调用LLM生成简历
+        existing_resume: 用户提供的已有简历（Markdown文本），传入时作为事实骨架增强生成
         """
         api = APIProcessor(provider=provider) if provider else self._api
 
@@ -459,10 +499,28 @@ class AgentTools:
         if job_requirement:
             job_section = f"## 目标岗位要求\n{job_requirement}"
 
+        existing_resume_section = ""
+        if existing_resume and existing_resume.strip():
+            # 能提取到章节时显式列出顺序，约束LLM按已有简历的结构字段输出
+            sections = extract_resume_sections(existing_resume)
+            structure_hint = ""
+            if sections:
+                structure_hint = (
+                    f"\n输出必须严格沿用已有简历的章节结构与顺序：{'、'.join(sections)}，"
+                    f"不增删或重排章节，不套用默认简历模板；"
+                    f"各章节内部的字段与条目格式也必须沿用已有简历（如工作经历的"
+                    f"“时间/公司/职位/工作内容”字段行、项目经历的“技术栈/项目描述/责任描述”字段），"
+                    f"项目素材需改写为该字段格式，不得照搬素材文档自身的结构。"
+                )
+            existing_resume_section = (
+                f"\n## 我的已有简历（事实骨架，保留其中真实内容）{structure_hint}\n{existing_resume}\n"
+            )
+
         user_prompt = RESUME_GENERATE_USER.format(
             knowledge=knowledge,
             projects=projects,
             job_section=job_section,
+            existing_resume_section=existing_resume_section,
         )
 
         try:
@@ -473,8 +531,8 @@ class AgentTools:
                 human_content=user_prompt,
             )
             if isinstance(result, dict):
-                return result.get("content", str(result))
-            return str(result)
+                return strip_llm_preamble(result.get("content", str(result)))
+            return strip_llm_preamble(str(result))
         except Exception as e:
             _log.error(f"简历生成失败: {e}")
             return f"简历生成失败: {e}"
@@ -503,8 +561,8 @@ class AgentTools:
                 human_content=user_prompt,
             )
             if isinstance(result, dict):
-                return result.get("content", str(result))
-            return str(result)
+                return strip_llm_preamble(result.get("content", str(result)))
+            return strip_llm_preamble(str(result))
         except Exception as e:
             _log.error(f"简历优化失败: {e}")
             return f"简历优化失败: {e}"

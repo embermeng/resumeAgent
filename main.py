@@ -8,6 +8,9 @@ CLI入口 - 知识库构建等批处理命令
     python main.py ingest-highlights   # 项目亮点文档入库（category=project）
     python main.py build-all           # 一键构建完整知识库
     python main.py chat                # CLI交互模式（测试Agent）
+
+说明:知识库构建逻辑已抽取到 src/api/services/knowledge_service.py,
+     CLI 与 FastAPI 后台任务共用同一套实现(单一数据源),此处仅做参数适配。
 """
 import sys
 import argparse
@@ -23,139 +26,49 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 _log = logging.getLogger(__name__)
 
 
+def _service():
+    """构造知识库构建服务(CLI 与 API 共用同一套逻辑)"""
+    from src.api.services.knowledge_service import KnowledgeService
+    return KnowledgeService(config=get_config())
+
+
+def _cli_progress(stage, message, percent):
+    """CLI 进度打印(与 API 的 SSE 进度共用 service 编排)"""
+    _log.info(message)
+
+
 def cmd_parse_pdfs(args):
     """解析PDF为Markdown"""
-    from src.knowledge.pdf_parser import PDFParser
-
-    config = get_config()
-    pdf_dir = config.paths.course_pdfs_dir
-    output_dir = config.paths.processed_dir / "parsed_pdfs"
-
-    _log.info(f"开始解析PDF: {pdf_dir}")
-    parser = PDFParser(output_dir=output_dir)
-    force = getattr(args, "force", False)
-    results = parser.parse_and_export_json(pdf_dir, output_dir, category="course", force=force)
-    _log.info(f"解析完成，共处理 {len(results)} 个PDF")
+    _service().parse_pdfs(force=getattr(args, "force", False))
 
 
 def cmd_split_chunks(args):
     """文本分块（增量，默认只分块新文档和源文档更新过的文档）"""
-    from src.knowledge.text_splitter import TextSplitter
-
-    config = get_config()
-    input_dir = config.paths.processed_dir / "parsed_pdfs"
-    output_dir = config.paths.course_chunks_dir
-
-    _log.info(f"开始分块: {input_dir} -> {output_dir}")
-    splitter = TextSplitter()
-
-    # 处理parsed_pdfs目录下的markdown文件
-    if input_dir.exists():
-        # 如果有JSON文件，先提取markdown内容到.md文件
-        import json
-        import hashlib
-        md_dir = config.paths.processed_dir / "markdown_temp"
-        md_dir.mkdir(parents=True, exist_ok=True)
-
-        for json_path in input_dir.glob("*.json"):
-            with open(json_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if "content" not in data or "markdown" not in data["content"]:
-                continue
-
-            source = data["metainfo"].get("source", json_path.stem)
-            md_path = md_dir / f"{source}.md"
-            md_path.write_text(data["content"]["markdown"], encoding="utf-8")
-
-            # 过期检测：解析结果比分块新（源文档更新过）→ 删除旧分块，强制重新分块
-            doc_id = hashlib.md5(source.encode()).hexdigest()[:16]
-            chunk_path = output_dir / f"{doc_id}.json"
-            if chunk_path.exists() and json_path.stat().st_mtime > chunk_path.stat().st_mtime:
-                _log.info(f"解析结果已更新，重新分块: {source}")
-                chunk_path.unlink()
-
-        splitter.split_and_save(md_dir, output_dir, category="course",
-                                chunk_size=args.chunk_size, chunk_overlap=args.chunk_overlap,
-                                force=getattr(args, "force", False))
-    else:
-        _log.warning(f"目录不存在: {input_dir}，请先运行 parse-pdfs")
+    _service().split_chunks(
+        chunk_size=args.chunk_size,
+        chunk_overlap=args.chunk_overlap,
+        force=getattr(args, "force", False),
+    )
 
 
 def cmd_extract_summaries(args):
     """提取课程结构化摘要并合并为目录（增量，默认只处理新文档和解析更新过的文档）"""
-    from src.knowledge.summarizer import CourseSummarizer
-
-    config = get_config()
-    parsed_dir = config.paths.processed_dir / "parsed_pdfs"
-    output_dir = config.paths.course_summaries_dir
-
-    if not parsed_dir.exists() or not list(parsed_dir.glob("*.json")):
-        _log.warning(f"解析结果为空: {parsed_dir}，请先运行 parse-pdfs")
-        return
-
-    _log.info(f"开始提取课程摘要: {parsed_dir} -> {output_dir}")
-    summarizer = CourseSummarizer(
-        provider=config.llm.provider,
-        model=config.llm.model,
-    )
-    stats = summarizer.process_parsed_dir(
-        parsed_dir, output_dir, force=getattr(args, "force", False)
-    )
-
-    # 每次跑完都重新合并目录（纯本地拼接，无API成本）
-    summarizer.build_catalog(output_dir, config.paths.catalog_path)
-    _log.info(f"摘要提取完成: {stats}")
+    _service().extract_summaries(force=getattr(args, "force", False))
 
 
 def cmd_build_indexes(args):
     """构建向量/BM25索引（增量，默认跳过已有索引）"""
-    from src.knowledge.ingestion import BM25Ingestor, VectorDBIngestor
-
-    config = get_config()
-    chunks_dir = config.paths.course_chunks_dir
-
-    if not chunks_dir.exists() or not list(chunks_dir.glob("*.json")):
-        _log.warning(f"分块目录为空: {chunks_dir}，请先运行 split-chunks")
-        return
-
-    force = getattr(args, "force", False)
-    prune = getattr(args, "prune", False)
-
-    if args.bm25:
-        _log.info("构建BM25索引...")
-        bm25 = BM25Ingestor()
-        bm25.process_chunks_dir(chunks_dir, config.paths.bm25_dbs_dir, force=force, prune=prune)
-
-    if args.vector:
-        _log.info("构建FAISS向量索引...")
-        vector = VectorDBIngestor(
-            embedding_provider=config.embedding.provider,
-            embedding_model=config.embedding.model,
-        )
-        vector.process_chunks_dir(chunks_dir, config.paths.vector_dbs_dir, force=force, prune=prune)
-
-    _log.info("索引构建完成")
+    _service().build_indexes(
+        bm25=args.bm25,
+        vector=args.vector,
+        force=getattr(args, "force", False),
+        prune=getattr(args, "prune", False),
+    )
 
 
 def cmd_ingest_highlights(args):
     """项目亮点文档入库：md -> category=project分块，写入course_chunks待建索引"""
-    from src.knowledge.highlight_ingestor import HighlightIngestor
-
-    config = get_config()
-    highlights_dir = config.paths.project_highlights_dir
-
-    if not highlights_dir.exists() or not list(highlights_dir.glob("*.md")):
-        _log.warning(f"项目亮点目录为空: {highlights_dir}，请先放入项目亮点README（.md）")
-        return
-
-    _log.info(f"开始入库项目亮点文档: {highlights_dir}")
-    ingestor = HighlightIngestor()
-    ingestor.ingest(
-        highlights_dir,
-        config.paths.course_chunks_dir,
-        force=getattr(args, "force", False),
-    )
-    _log.info("入库完成，请运行 build-indexes 建立索引")
+    _service().ingest_highlights(force=getattr(args, "force", False))
 
 
 def cmd_build_all(args):
@@ -164,27 +77,13 @@ def cmd_build_all(args):
     _log.info("开始一键构建知识库")
     _log.info("=" * 50)
 
-    # Step 1: 解析PDF
-    _log.info("[1/5] 解析PDF...")
-    cmd_parse_pdfs(args)
-
-    # Step 2: 提取课程摘要与目录（分层检索用）
-    _log.info("[2/5] 提取课程摘要...")
-    cmd_extract_summaries(args)
-
-    # Step 3: 分块
-    _log.info("[3/5] 文本分块...")
-    cmd_split_chunks(args)
-
-    # Step 4: 项目亮点文档入库（与课程分块合并建索引）
-    _log.info("[4/5] 项目亮点文档入库...")
-    cmd_ingest_highlights(args)
-
-    # Step 5: 构建索引
-    _log.info("[5/5] 构建索引...")
-    args.bm25 = True
-    args.vector = True
-    cmd_build_indexes(args)
+    _service().build_all(
+        force=getattr(args, "force", False),
+        chunk_size=args.chunk_size,
+        chunk_overlap=args.chunk_overlap,
+        prune=getattr(args, "prune", False),
+        progress=_cli_progress,
+    )
 
     _log.info("=" * 50)
     _log.info("知识库构建完成！")

@@ -129,6 +129,7 @@ class ResumeAgent:
         user_input = state.get("user_input", "")
         entities = state.get("extracted_entities", {})
         has_job = state.get("has_job_requirement", False)
+        existing_resume = state.get("existing_resume") or None
 
         # 提取岗位要求（如有）
         job_requirement = entities.get("job_requirement", user_input) if has_job else None
@@ -140,11 +141,12 @@ class ResumeAgent:
         if not projects:
             projects = self.tools.search_projects(user_input, top_n=5)
 
-        # 生成简历草稿
+        # 生成简历草稿（有已有简历时作为事实骨架增强生成）
         resume_draft = self.tools.generate_resume(
             knowledge=knowledge,
             projects=projects,
             job_requirement=job_requirement,
+            existing_resume=existing_resume,
         )
 
         # 如果有岗位要求，进一步优化
@@ -202,11 +204,12 @@ class ResumeAgent:
             "step": "chitchat_done",
         }
 
-    def run(self, user_input: str) -> Dict:
+    def run(self, user_input: str, existing_resume: str = None) -> Dict:
         """
         运行Agent
         参数:
             user_input: 用户输入
+            existing_resume: 用户提供的已有简历（Markdown文本，仅深思路径生成简历时使用）
         返回:
             包含final_response等字段的字典
         """
@@ -216,6 +219,7 @@ class ResumeAgent:
             "intent": "",
             "extracted_entities": {},
             "has_job_requirement": False,
+            "existing_resume": existing_resume or "",
             "retrieved_knowledge": "",
             "retrieved_projects": "",
             "resume_draft": "",
@@ -227,9 +231,12 @@ class ResumeAgent:
         result = self.graph.invoke(initial_state)
         return result
 
-    def run_stream(self, user_input: str):
+    def run_stream(self, user_input: str, existing_resume: str = None):
         """
         流式运行Agent，逐步yield事件字典（供Web UI增量渲染，SSE效果）
+        参数:
+            user_input: 用户输入
+            existing_resume: 用户提供的已有简历（Markdown文本，仅深思路径生成简历时使用）
         事件类型:
             {"type": "status", "text": str}  阶段进度提示
             {"type": "token", "text": str}   回答文本增量
@@ -296,9 +303,12 @@ class ResumeAgent:
             if not projects:
                 projects = self.tools.search_projects(user_input, top_n=5)
 
+            if existing_resume and existing_resume.strip():
+                yield {"type": "status", "text": "📎 检测到已有简历，将基于它增强生成..."}
             yield {"type": "status", "text": "正在生成简历草稿（耗时较长，请稍候）..."}
             resume_draft = self.tools.generate_resume(
                 knowledge=knowledge, projects=projects, job_requirement=job_requirement,
+                existing_resume=existing_resume,
             )
 
             resume_final = resume_draft

@@ -13,6 +13,7 @@
 - **项目亮点文档入库**：项目亮点 README 入库打上 `project` 类别标签，供项目知识问答与素材兜底
 - **智能问答**：基于知识库的技术知识问答（RAG）
 - **简历生成**：综合课程知识分块 + 项目介绍成品（无介绍文档时降级用亮点分块），自动生成/优化简历
+- **基于已有简历生成**：Web 侧边栏上传已有简历（Word/PDF/md/txt，按类型分流解析），生成时沿用其章节结构与字段顺序，保留其中真实事实（个人信息/教育/工作经历）并用知识库素材增强措辞
 - **双模式路由**：Agent 自动判断意图，选择快速回答或深度思考路径
 
 ---
@@ -22,7 +23,8 @@
 ```
 ResumeAgent/
 ├── main.py                  # CLI 入口（知识库构建命令）
-├── app_streamlit.py         # Streamlit Web UI
+├── app_streamlit.py         # Streamlit Web UI（保留）
+├── app_api.py               # FastAPI 后端入口（前后端分离）
 ├── requirements.txt
 ├── .env.example             # 环境变量示例
 │
@@ -41,10 +43,12 @@ ResumeAgent/
 │   ├── retrieval/           # 检索模块
 │   ├── agent/               # LangGraph Agent 模块
 │   ├── prompts/             # 提示词模板
-│   └── schemas/             # 数据模型
+│   ├── schemas/             # 数据模型
+│   └── api/                 # FastAPI 后端（app/routers/services/task_manager/sse）
 │
-├── tests/                   # 215 个测试用例
-└── docs/                    # 设计文档与报告
+├── frontend/                # Vue3 + Vite + TS 前端（Pinia/Element Plus/Vitest）
+├── tests/                   # 后端测试：329 passed（含 tests/test_api/）
+└── docs/                    # 设计文档、报告与 specs/api-contract.md（前后端契约）
 ```
 
 ---
@@ -209,6 +213,8 @@ streamlit run app_streamlit.py
 
 浏览器会自动打开 `http://localhost:8501`，在聊天框中直接输入即可。
 
+**基于已有简历生成**（可选）：在侧边栏“📎 我的已有简历”上传 `.docx/.pdf/.md/.txt` 文件（Word 用 python-docx 提取段落表格，手工排版的加粗章节行也会识别为标题；PDF 复用 MinerU 解析），上传后解析一次并缓存，可预览/移除；之后说“生成简历”时，Agent 会以它为事实骨架，**沿用它的章节结构与章节内字段格式输出**（如“时间/公司/职位/工作内容”“技术栈/项目描述/责任描述”，不套用默认模板），保留个人信息、教育背景、工作经历等真实内容，再用知识库素材增强项目经历与技能措辞。
+
 回答采用**流式输出**（SSE效果）：先显示阶段进度（意图识别 → 知识库检索 → 生成回答），然后逐字展示答案，无需等待全部生成完毕。
 
 **使用示例：**
@@ -221,7 +227,7 @@ streamlit run app_streamlit.py
 | "帮我生成一份简历" | 🧠 深度思考模式 → 检索知识 + 项目 → 生成简历 |
 | "帮我生成一份 AI 工程师方向的简历，岗位要求如下..." | 🧠 深度思考模式 → 针对性生成 + 优化 |
 
-生成简历后，页面会出现 **下载按钮**，可以下载 Markdown 格式的简历文件。
+生成简历后，页面会出现 **下载按钮**（Markdown 格式）。
 
 ### 方式二：CLI 交互模式
 
@@ -259,6 +265,54 @@ You: 帮我生成一份简历
 
 You: quit
 Bye!
+```
+
+---
+
+## 前后端分离 Web 应用（FastAPI + Vue3）
+
+除 Streamlit 与 CLI 外，项目提供**前后端分离**的现代 Web 应用：后端用 FastAPI 封装 Agent 流式能力与知识库构建任务，前端用 Vue3 全新实现。单用户本地/演示、无鉴权、全局单 Agent 实例。接口契约见 [docs/specs/api-contract.md](docs/specs/api-contract.md)（SDD 唯一真理来源）。
+
+### 架构
+
+- **后端**（`app_api.py` + `src/api/`）：FastAPI 应用工厂，复用 `src.*` 全部逻辑，不改动 Agent。
+  - `POST /api/chat`（SSE）：封装 `ResumeAgent.run_stream()`，逐帧下发 `status/intent/token/done/error`。
+  - `POST /api/resume/parse`、`GET /api/resume/supported-extensions`：简历文件上传解析。
+  - `POST /api/knowledge/build` + `GET /api/knowledge/tasks/{id}/stream`（SSE）：后台线程执行知识库构建，实时推送进度。
+  - `GET /api/health`：健康检查。
+- **前端**（`frontend/`）：Vue3 + Vite + TypeScript + Pinia + Vue Router + Element Plus；用 `fetch + ReadableStream` 消费 SSE，`markdown-it + highlight.js + DOMPurify` 安全渲染。
+
+### 启动后端
+
+```bash
+cd ResumeAgent
+pip install -r requirements.txt          # 含 fastapi / uvicorn[standard] / python-multipart
+uvicorn app_api:app --reload --port 8000
+```
+
+后端就绪后：`http://localhost:8000/docs` 查看自动生成的 OpenAPI 文档，`http://localhost:8000/api/health` 做健康检查。
+
+### 启动前端
+
+```bash
+cd frontend
+npm install
+npm run dev                              # http://localhost:5173，/api 已代理到 :8000
+```
+
+打开 `http://localhost:5173`：
+
+- **智能对话**（`/`）：流式问答、上传已有简历、深思路径生成简历并预览/下载 Markdown。
+- **知识库管理**（`/admin`）：一键触发 `build-all` 等构建任务，SSE 实时进度条与日志。
+
+> 前端 dev server 通过 Vite proxy 将 `/api` 转发到后端 `:8000`，无需额外配置跨域。
+
+### 前端构建产物
+
+```bash
+cd frontend
+npm run build                            # vue-tsc 类型检查 + vite 打包到 dist/
+npm run preview                          # 本地预览生产包
 ```
 
 ---
@@ -305,13 +359,23 @@ Agent 通过 **意图识别** 自动选择处理路径：
 
 ## 运行测试
 
+**后端（pytest，329 passed）：**
+
 ```bash
-# 运行全部测试
+# 运行全部后端测试
 pytest tests/ -v
 
-# 运行某个模块的测试
+# 按模块运行
 pytest tests/test_agent/ -v
-pytest tests/test_knowledge/ -v
+pytest tests/test_api/ -v          # FastAPI 路由/服务/SSE/任务管理
+```
+
+**前端（Vitest，83 passed）：**
+
+```bash
+cd frontend
+npm run test                       # vitest run（composables/api/stores/组件/视图）
+npm run build                      # 附带 vue-tsc --noEmit 类型检查
 ```
 
 ---
@@ -349,10 +413,14 @@ pytest tests/test_knowledge/ -v
 - **向量数据库**：FAISS
 - **全文检索**：BM25 (rank-bm25)
 - **PDF 解析**：MinerU
+- **Word 解析**：python-docx（上传已有简历的 docx 解析）
 - **Token 计数**：tiktoken
 - **数据模型**：Pydantic v2
-- **Web UI**：Streamlit
-- **测试**：pytest（215 个测试用例）
+- **Web UI**：Streamlit（保留）+ 前后端分离 Web 应用（FastAPI + Vue3）
+- **后端 API**：FastAPI + Uvicorn（SSE 流式、后台线程任务）
+- **前端**：Vue3 + Vite + TypeScript + Pinia + Vue Router + Element Plus
+- **Markdown 渲染**：markdown-it + highlight.js + DOMPurify
+- **测试**：pytest（后端 329）+ Vitest / @vue/test-utils（前端 83）
 
 ---
 

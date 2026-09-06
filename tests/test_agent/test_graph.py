@@ -157,6 +157,36 @@ class TestResumeAgent:
         assert result["step"] == "chitchat_done"
         assert result["final_response"] == "你好！"
 
+    def test_deep_thinking_with_existing_resume(self, mock_components):
+        """已有简历应透传给generate_resume作为事实骨架"""
+        from src.agent.intent import IntentResult
+        mock_components["classifier"].classify.return_value = IntentResult(
+            intent=IntentType.DEEP_THINKING,
+            entities={},
+            confidence=0.9,
+        )
+
+        agent = ResumeAgent(config=mock_components["config"])
+        result = agent.run("帮我生成简历", existing_resume="# 张三的旧简历")
+
+        assert result["existing_resume"] == "# 张三的旧简历"
+        mock_components["tools"].generate_resume.assert_called_once()
+        assert mock_components["tools"].generate_resume.call_args.kwargs["existing_resume"] == "# 张三的旧简历"
+
+    def test_deep_thinking_without_existing_resume(self, mock_components):
+        """未提供已有简历时透传None（行为不变）"""
+        from src.agent.intent import IntentResult
+        mock_components["classifier"].classify.return_value = IntentResult(
+            intent=IntentType.DEEP_THINKING,
+            entities={},
+            confidence=0.9,
+        )
+
+        agent = ResumeAgent(config=mock_components["config"])
+        agent.run("帮我生成简历")
+
+        assert mock_components["tools"].generate_resume.call_args.kwargs["existing_resume"] is None
+
     def test_chitchat_api_error(self, mock_components):
         """测试闲聊API异常"""
         from src.agent.intent import IntentResult
@@ -249,3 +279,35 @@ class TestResumeAgentStream:
         assert events[-1]["resume_final"] == "# 简历\n\n## 项目经历"
         status_texts = [e["text"] for e in events if e["type"] == "status"]
         assert len(status_texts) >= 2  # 至少有检索和生成两个阶段提示
+
+    def test_deep_thinking_stream_with_existing_resume(self, mock_components):
+        """流式深思路径：有已有简历时输出提示并透传"""
+        from src.agent.intent import IntentResult
+        mock_components["classifier"].classify.return_value = IntentResult(
+            intent=IntentType.DEEP_THINKING,
+            entities={},
+            confidence=0.9,
+        )
+
+        agent = ResumeAgent(config=mock_components["config"])
+        events = list(agent.run_stream("帮我生成简历", existing_resume="# 旧简历"))
+
+        status_texts = [e["text"] for e in events if e["type"] == "status"]
+        assert any("检测到已有简历" in t for t in status_texts)
+        assert mock_components["tools"].generate_resume.call_args.kwargs["existing_resume"] == "# 旧简历"
+
+    def test_deep_thinking_stream_without_existing_resume(self, mock_components):
+        """流式深思路径：无已有简历时不输出相关提示"""
+        from src.agent.intent import IntentResult
+        mock_components["classifier"].classify.return_value = IntentResult(
+            intent=IntentType.DEEP_THINKING,
+            entities={},
+            confidence=0.9,
+        )
+
+        agent = ResumeAgent(config=mock_components["config"])
+        events = list(agent.run_stream("帮我生成简历"))
+
+        status_texts = [e["text"] for e in events if e["type"] == "status"]
+        assert not any("检测到已有简历" in t for t in status_texts)
+        assert mock_components["tools"].generate_resume.call_args.kwargs["existing_resume"] is None

@@ -7,7 +7,7 @@ from unittest.mock import patch, MagicMock
 
 from src.agent.state import AgentState
 from src.agent.intent import IntentClassifier, IntentType, IntentResult
-from src.agent.tools import AgentTools
+from src.agent.tools import AgentTools, extract_resume_sections, strip_llm_preamble
 
 
 # ============================================================
@@ -212,6 +212,190 @@ class TestAgentTools:
         tools = AgentTools(config=config)
         result = tools.generate_resume("知识", "项目", job_requirement="JD内容")
         assert isinstance(result, str)
+
+    @patch("src.agent.tools.APIProcessor")
+    @patch("src.agent.tools.get_config")
+    def test_generate_resume_with_existing_resume(self, mock_config, mock_api_class):
+        """已有简历应作为事实骨架段进入prompt"""
+        config = MagicMock()
+        config.llm.provider = "dashscope"
+        config.llm.model = "test-model"
+        mock_config.return_value = config
+
+        mock_api = MagicMock()
+        mock_api.send_message.return_value = {"content": "# 增强后的简历"}
+        mock_api_class.return_value = mock_api
+
+        tools = AgentTools(config=config)
+        result = tools.generate_resume("知识", "项目", existing_resume="# 张三\n5年前端经验")
+
+        assert result == "# 增强后的简历"
+        human = mock_api.send_message.call_args.kwargs["human_content"]
+        assert "我的已有简历" in human
+        assert "5年前端经验" in human
+
+    @patch("src.agent.tools.APIProcessor")
+    @patch("src.agent.tools.get_config")
+    def test_generate_resume_without_existing_resume(self, mock_config, mock_api_class):
+        """不传已有简历时prompt不含该段（行为向下兼容）"""
+        config = MagicMock()
+        config.llm.provider = "dashscope"
+        config.llm.model = "test-model"
+        mock_config.return_value = config
+
+        mock_api = MagicMock()
+        mock_api.send_message.return_value = {"content": "# 简历"}
+        mock_api_class.return_value = mock_api
+
+        tools = AgentTools(config=config)
+        tools.generate_resume("知识", "项目")
+
+        human = mock_api.send_message.call_args.kwargs["human_content"]
+        assert "我的已有简历" not in human
+
+    @patch("src.agent.tools.APIProcessor")
+    @patch("src.agent.tools.get_config")
+    def test_generate_resume_existing_with_sections_hints_structure(self, mock_config, mock_api_class):
+        """已有简历含Markdown标题时，prompt应显式要求沿用其章节顺序"""
+        config = MagicMock()
+        config.llm.provider = "dashscope"
+        config.llm.model = "test-model"
+        mock_config.return_value = config
+
+        mock_api = MagicMock()
+        mock_api.send_message.return_value = {"content": "# 简历"}
+        mock_api_class.return_value = mock_api
+
+        existing = "# 张三\n\n## 教育背景\n\n某大学\n\n## 工作经历\n\n某公司前端"
+        tools = AgentTools(config=config)
+        tools.generate_resume("知识", "项目", existing_resume=existing)
+
+        human = mock_api.send_message.call_args.kwargs["human_content"]
+        assert "严格沿用已有简历的章节结构与顺序" in human
+        assert "张三、教育背景、工作经历" in human
+        assert "不套用默认简历模板" in human
+
+    @patch("src.agent.tools.APIProcessor")
+    @patch("src.agent.tools.get_config")
+    def test_generate_resume_existing_without_sections_no_hint(self, mock_config, mock_api_class):
+        """纯文本已有简历（无标题行）不注入章节提示，但保留已有简历段"""
+        config = MagicMock()
+        config.llm.provider = "dashscope"
+        config.llm.model = "test-model"
+        mock_config.return_value = config
+
+        mock_api = MagicMock()
+        mock_api.send_message.return_value = {"content": "# 简历"}
+        mock_api_class.return_value = mock_api
+
+        tools = AgentTools(config=config)
+        tools.generate_resume("知识", "项目", existing_resume="张三，5年前端经验，熟悉React")
+
+        human = mock_api.send_message.call_args.kwargs["human_content"]
+        assert "我的已有简历" in human
+        assert "严格沿用已有简历的章节结构与顺序" not in human
+
+
+# ============================================================
+# extract_resume_sections 章节提取测试
+# ============================================================
+
+class TestExtractResumeSections:
+    def test_extracts_markdown_headings_in_order(self):
+        text = "# 张三\n\n## 个人信息\n\n内容\n\n## 项目经历\n\n内容\n\n## 教育背景"
+        assert extract_resume_sections(text) == ["张三", "个人信息", "项目经历", "教育背景"]
+
+    def test_deduplicates_repeated_titles(self):
+        text = "# 简历\n\n## 项目经历\n\n一\n\n## 项目经历\n\n二"
+        assert extract_resume_sections(text) == ["简历", "项目经历"]
+
+    def test_no_headings_returns_empty(self):
+        assert extract_resume_sections("张三，5年前端经验\n熟悉React和Vue") == []
+
+    def test_ignores_hash_inside_line(self):
+        """非行首的#不应被当作标题"""
+        assert extract_resume_sections("技能：C#、F#\n正文一行") == []
+
+
+# ============================================================
+# strip_llm_preamble 开场白剥离与生成后处理测试
+# ============================================================
+
+class TestStripLlmPreamble:
+    def test_strips_preamble_before_first_heading(self):
+        text = "以下是为您深度优化后的简历。本次优化严格遵循了您的原始经历。\n\n# 简历\n\n## 求职意向"
+        assert strip_llm_preamble(text).startswith("# 简历")
+
+    def test_keeps_text_without_preamble_features(self):
+        """首段不命中开场白特征时不剥离（避免误删姓名等正常开头）"""
+        text = "孟龙翔\n5年前端经验\n\n# 简历"
+        assert strip_llm_preamble(text) == text
+
+    def test_keeps_text_starting_with_heading(self):
+        text = "# 简历\n\n正文"
+        assert strip_llm_preamble(text) == text
+
+    def test_empty_text_returns_as_is(self):
+        assert strip_llm_preamble("") == ""
+
+
+class TestResumeOutputPostprocess:
+    """生成/优化返回值的开场白兜底剥离与structure_hint字段格式约束"""
+
+    @patch("src.agent.tools.APIProcessor")
+    @patch("src.agent.tools.get_config")
+    def test_generate_resume_strips_preamble(self, mock_config, mock_api_class):
+        config = MagicMock()
+        config.llm.provider = "dashscope"
+        config.llm.model = "test-model"
+        mock_config.return_value = config
+
+        mock_api = MagicMock()
+        mock_api.send_message.return_value = {"content": "以下是为您生成的简历：\n\n# 简历\n\n内容"}
+        mock_api_class.return_value = mock_api
+
+        tools = AgentTools(config=config)
+        result = tools.generate_resume("知识", "项目")
+        assert result.startswith("# 简历")
+
+    @patch("src.agent.tools.APIProcessor")
+    @patch("src.agent.tools.get_config")
+    def test_optimize_resume_strips_preamble(self, mock_config, mock_api_class):
+        config = MagicMock()
+        config.llm.provider = "dashscope"
+        config.llm.model = "test-model"
+        mock_config.return_value = config
+
+        mock_api = MagicMock()
+        mock_api.send_message.return_value = {"content": "以下是优化后的简历。\n\n# 简历\n\n内容"}
+        mock_api_class.return_value = mock_api
+
+        tools = AgentTools(config=config)
+        result = tools.optimize_resume("# 旧简历", "岗位要求AI Agent经验")
+        assert result.startswith("# 简历")
+
+    @patch("src.agent.tools.APIProcessor")
+    @patch("src.agent.tools.get_config")
+    def test_structure_hint_requires_field_format(self, mock_config, mock_api_class):
+        """有章节的已有简历：提示应要求沿用章节内字段格式并改写素材"""
+        config = MagicMock()
+        config.llm.provider = "dashscope"
+        config.llm.model = "test-model"
+        mock_config.return_value = config
+
+        mock_api = MagicMock()
+        mock_api.send_message.return_value = {"content": "# 简历"}
+        mock_api_class.return_value = mock_api
+
+        tools = AgentTools(config=config)
+        tools.generate_resume(
+            "知识", "项目",
+            existing_resume="# 张三\n\n## 工作经历\n\n时间：2021-2022\n\n## 项目经验\n\n技术栈：Vue3",
+        )
+        human = mock_api.send_message.call_args.kwargs["human_content"]
+        assert "字段与条目格式也必须沿用" in human
+        assert "技术栈/项目描述/责任描述" in human
+        assert "不得照搬素材文档自身的结构" in human
 
 
 # ============================================================

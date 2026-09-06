@@ -12,6 +12,7 @@ class AgentState(TypedDict):
     intent: str                           # 意图分类：quick_response / deep_thinking / chitchat
     extracted_entities: Dict[str, Any]    # 意图识别时提取的实体
     has_job_requirement: bool             # 是否有岗位要求
+    existing_resume: str                  # 用户提供的已有简历（解析后的Markdown文本，生成时作为事实骨架）
     retrieved_knowledge: str              # 检索到的知识上下文
     retrieved_projects: str               # 检索到的项目精华
     resume_draft: str                     # 简历草稿
