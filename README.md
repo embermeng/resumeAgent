@@ -426,6 +426,7 @@ npm run build                      # 附带 vue-tsc --noEmit 类型检查
 
 ## 相关文档
 
+- [云端部署方案](docs/部署方案.md) - 单容器同域部署（Docker + Nginx + HTTPS）与备选方案
 - [项目设计计划](docs/项目计划.md) - SDD + TDD 完整实施计划
 - [完成报告](docs/完成报告.md) - 项目完成情况总结
 # resumeAgent
