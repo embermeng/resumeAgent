@@ -1,0 +1,59 @@
+# 开发编排:app(FastAPI 后端) + db(PostgreSQL),同网络互通,独立数据卷。
+# 用途:在 Linux 容器里体验异步 SQLAlchemy(psycopg v3 async),规避 Windows Proactor 限制。
+#
+# 启动:
+#   docker compose -f docker-compose.dev.yml up --build
+# 首次建表(容器内跑 Alembic 迁移):
+#   docker compose -f docker-compose.dev.yml exec app alembic upgrade head
+# 停止并清空数据库卷:
+#   docker compose -f docker-compose.dev.yml down -v
+#
+# 注意:本文件发布 127.0.0.1:8000,会与你宿主上直接跑的 uvicorn 抢端口。
+#      用本 compose 前,先停掉宿主的 `python -m uvicorn app_api:app`(终端 1)。
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: resume-agent-db-dev
+    environment:
+      POSTGRES_USER: resume
+      POSTGRES_PASSWORD: resume
+      POSTGRES_DB: resumeagent
+      TZ: Asia/Shanghai
+    ports:
+      # 宿主 5433 -> 容器 5432,避免与你本机已装的 PostgreSQL(5432)冲突
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - pgdata_dev:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U resume -d resumeagent"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: resume-agent-dev
+    # 先加载 .env(拿 DASHSCOPE_API_KEY 等),再用 environment 覆盖 DATABASE_URL 指向 db 服务
+    env_file:
+      - .env
+    environment:
+      # 关键:容器内 localhost 指容器自己,必须用服务名 db 作为主机
+      DATABASE_URL: postgresql+psycopg://resume:resume@db:5432/resumeagent
+      SERVE_STATIC: "0"
+      CORS_ORIGINS: "*"
+      TZ: Asia/Shanghai
+    volumes:
+      # 挂载整个项目根,pyprojroot here() 才能定位到根;改源码 --reload 即时生效
+      - .:/app
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    command: uvicorn app_api:app --host 0.0.0.0 --port 8000 --reload
+
+volumes:
+  pgdata_dev:

@@ -46,6 +46,7 @@ data: <单行 JSON>
 |---|---|---|---|
 | `ChatRequest` | `prompt` | string | 用户输入,必填,非空 |
 | | `existing_resume` | string? | 已有简历 Markdown 文本,可选 |
+| | `conversation_id` | int? | 所属会话 id;为空则服务端新建会话并经 `conversation` 事件回传 |
 | `ParseResponse` | `filename` | string | 原始文件名 |
 | | `content` | string | 解析出的 Markdown 文本 |
 | `SupportedExtensions` | `extensions` | string[] | 如 `[".md",".txt",".docx",".pdf"]` |
@@ -65,6 +66,21 @@ data: <单行 JSON>
 | | `created_at` | number | 创建时间(epoch 秒) |
 | | `finished_at` | number? | 结束时间(epoch 秒) |
 | | `error` | string? | 失败原因 |
+| `TaskList` | `tasks` | TaskStatus[] | 任务状态列表 |
+| | `total` | int | 任务总数 |
+| `ConversationSummary` | `id` | int | 会话 id |
+| | `title` | string | 会话标题(取首条用户消息截断至 50 字) |
+| | `created_at` | number | 创建时间(epoch 秒) |
+| | `updated_at` | number | 最后活动时间(epoch 秒) |
+| `ConversationList` | `conversations` | ConversationSummary[] | 会话列表(updated_at 降序) |
+| | `total` | int | 会话总数 |
+| `MessageOut` | `id` | int | 消息 id |
+| | `role` | string | `"user"` / `"assistant"` |
+| | `content` | string | 消息文本 |
+| | `intent` | string? | 意图(仅 assistant 消息有值) |
+| | `created_at` | number | 创建时间(epoch 秒) |
+| `ConversationMessages` | `conversation_id` | int | 会话 id |
+| | `messages` | MessageOut[] | 消息列表(created_at 升序) |
 
 ### 2.2 枚举
 
@@ -86,6 +102,9 @@ data: <单行 JSON>
 | 5 | POST | `/api/knowledge/build` | JSON | 触发知识库构建后台任务 |
 | 6 | GET | `/api/knowledge/tasks/{task_id}/stream` | SSE | 订阅任务进度 |
 | 7 | GET | `/api/knowledge/tasks/{task_id}` | JSON | 查询任务状态快照(轮询兜底) |
+| 8 | GET | `/api/knowledge/tasks` | JSON | 任务列表(分页,created_at 降序) |
+| 9 | GET | `/api/conversations` | JSON | 会话列表(分页,updated_at 降序) |
+| 10 | GET | `/api/conversations/{id}/messages` | JSON | 查询某会话的消息历史 |
 
 ## 4. 接口详情
 
@@ -103,6 +122,7 @@ data: <单行 JSON>
 对话 SSE 事件协议:
 
 ```
+event: conversation data: {"conversation_id":42}
 event: status   data: {"text":"正在识别意图..."}
 event: intent   data: {"value":"quick_response"}
 event: token    data: {"text":"RAG"}
@@ -111,6 +131,7 @@ event: error    data: {"message":"..."}
 ```
 
 事件字段说明:
+- `conversation`:`{conversation_id: int}` **流首帧**,回传本次对话所属会话 id(新建或沿用);前端存 sessionStorage,后续消息经 `ChatRequest.conversation_id` 回传以归入同一会话。
 - `status`:`{text}` 阶段进度提示(深思路径会有多条)。
 - `intent`:`{value: Intent}` 意图识别结果,通常在首个 status 之后到达。
 - `token`:`{text}` 回答文本增量(quick_response/chitchat 逐块;deep_thinking 一次性给出整份简历文本)。
@@ -118,7 +139,7 @@ event: error    data: {"message":"..."}
 - `error`:`{message}` 流中异常。
 
 事件顺序保证:
-- 一定以 `status` 开头、以 `done` 或 `error` 结尾。
+- 一定以 `conversation` 开头(恰一次),其后 `status`,以 `done` 或 `error` 结尾。
 - `intent` 恰出现一次,在首个 `status` 之后。
 - `token` 出现 0 次或多次。
 
@@ -167,6 +188,21 @@ event: error    data: {"message":"..."}
 - 响应 `200`:`TaskStatus` 快照。
 - 不存在 → `404` `{"detail": "task not found"}`
 
+### 4.8 GET /api/knowledge/tasks
+
+- 查询参数:`page`(默认 1,≥1)、`page_size`(默认 10,1~100)。
+- 响应 `200`:`TaskList`,直接查 `build_tasks` 表,按 `created_at` 降序分页。
+
+### 4.9 GET /api/conversations
+
+- 查询参数:`page`(默认 1,≥1)、`page_size`(默认 20,1~100)。
+- 响应 `200`:`ConversationList`,按 `updated_at` 降序分页。
+
+### 4.10 GET /api/conversations/{id}/messages
+
+- 响应 `200`:`ConversationMessages`,消息按 `created_at` 升序(时间正序)。
+- 会话不存在 → `404` `{"detail": "conversation not found"}`。
+
 ## 5. 阶段进度映射(build-all)
 
 `knowledge_service` 在各阶段调用 `progress_callback(stage, message, percent)`,`build-all` 的推荐百分比:
@@ -194,6 +230,7 @@ export type TaskKind =
 export type TaskState = 'pending' | 'running' | 'success' | 'failed'
 
 export type ChatEvent =
+  | { type: 'conversation'; conversation_id: number }
   | { type: 'status'; text: string }
   | { type: 'intent'; value: Intent }
   | { type: 'token'; text: string }

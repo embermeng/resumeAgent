@@ -80,6 +80,12 @@ export interface TaskStatus {
   error?: string
 }
 
+/** GET /api/knowledge/tasks 分页列表(created_at 降序) */
+export interface TaskList {
+  tasks: TaskStatus[]
+  total: number
+}
+
 export interface Health {
   status: string
 }

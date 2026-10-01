@@ -135,13 +135,25 @@ class RetrievalConfig:
 
 
 @dataclass
+class DatabaseConfig:
+    """数据库配置"""
+    database_url: str = os.getenv("DATABASE_URL", "")
+
+
+@dataclass
+class SecretStr:
+    """密钥配置"""
+    secret_key: str = os.getenv("SECRET_KEY", "")
+
+@dataclass
 class AppConfig:
     """应用总配置，聚合所有子配置"""
     paths: PathConfig = field(default_factory=PathConfig)
     llm: LLMConfig = field(default_factory=LLMConfig.from_env)
     embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig.from_env)
     retrieval: RetrievalConfig = field(default_factory=RetrievalConfig)
-
+    database: DatabaseConfig = field(default_factory=DatabaseConfig)
+    secret: SecretStr = field(default_factory=SecretStr)
     def __post_init__(self):
         self.paths.ensure_dirs()
 

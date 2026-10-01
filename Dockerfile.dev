@@ -1,0 +1,26 @@
+# 开发用后端镜像:精简(不含前端构建 / MinerU / torch),配合 compose 源码挂载 + --reload 迭代。
+# 用途:在 Linux 容器里跑通异步 SQLAlchemy(规避 Windows Proactor 事件循环限制)。
+#
+# 与生产 Dockerfile 的差异:
+#   - 不做前端多阶段构建(开发时前端走宿主 vite dev server,proxy 到本容器 8000)
+#   - 不 COPY 源码(源码由 docker-compose.dev.yml 的 volume 挂载进来,改代码 --reload 即生效)
+#   - 只装 requirements-prod.txt(已含 DB 层依赖);不装 mineru[core]/streamlit/pytest 等重型或开发依赖
+FROM python:3.11-slim
+
+# 国内机器用镜像源更快;海外可 --build-arg PIP_INDEX_URL=https://pypi.org/simple
+ARG PIP_INDEX_URL=https://mirrors.cloud.tencent.com/pypi/simple
+ENV PIP_INDEX_URL=$PIP_INDEX_URL \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1
+
+WORKDIR /app
+
+# 依赖先装(利用构建缓存);源码不打包,靠挂载
+COPY requirements-prod.txt ./
+RUN pip install --no-cache-dir -r requirements-prod.txt
+
+EXPOSE 8000
+
+# 开发默认开 --reload;compose 里也用 command 显式覆盖为同样的命令
+CMD ["uvicorn", "app_api:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]

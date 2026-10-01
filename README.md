@@ -292,6 +292,8 @@ uvicorn app_api:app --reload --port 8000
 
 后端就绪后：`http://localhost:8000/docs` 查看自动生成的 OpenAPI 文档，`http://localhost:8000/api/health` 做健康检查。
 
+> **Windows 注意**：`GET /api/knowledge/tasks` 与 `GET /api/knowledge/tasks/{id}` 是**异步路由**（psycopg3 异步引擎）。Windows 上 uvicorn 默认使用 ProactorEventLoop，不支持异步 DB 驱动依赖的 selector 回调，直接在宿主跑这两个接口会报错。Windows 开发者请改用下方的「用 Docker 运行后端」小节；Linux/macOS 默认 Selector 循环，无此问题。
+
 ### 启动前端
 
 ```bash
@@ -314,6 +316,50 @@ cd frontend
 npm run build                            # vue-tsc 类型检查 + vite 打包到 dist/
 npm run preview                          # 本地预览生产包
 ```
+
+---
+
+## 用 Docker 运行后端（Windows 异步开发推荐）
+
+后端的 `task_status` / `task_list` 是异步路由，依赖 psycopg3 异步引擎。**Windows 上 uvicorn 默认的 ProactorEventLoop 不支持异步 DB 驱动**，直接在宿主跑这两个接口会崩。最省事的解法是把后端放进 **Linux 容器**运行——容器默认 Selector(epoll) 循环，异步 SQLAlchemy 原样跑通，且与生产环境一致。
+
+项目为此提供了独立的开发编排（不影响生产用的 `Dockerfile` / `docker-compose.yml`）：
+
+- `Dockerfile.dev`：精简后端镜像（`python:3.11-slim` + `requirements-prod.txt`，不含前端构建 / MinerU / torch），源码靠挂载、默认开 `--reload`。
+- `docker-compose.dev.yml`：`app`（后端）+ `db`（`postgres:16-alpine`）两服务，同一内部网络。
+
+### 前置条件
+
+- 已安装并**启动 Docker Desktop**（`docker version` 能连上 daemon）。
+- 宿主上直接跑的 uvicorn 已停止（容器要发布 `127.0.0.1:8000`，否则抢端口）。
+
+### 启动
+
+```bash
+# 1. 构建并启动 app + db 两个容器（首次会拉镜像、装依赖，稍慢）
+docker compose -f docker-compose.dev.yml up --build
+
+# 2. 另开一个终端：容器内是全新空库，先跑迁移建表
+docker compose -f docker-compose.dev.yml exec app alembic upgrade head
+
+# 3. 验证异步读路由（空库返回 {"tasks":[],"total":0} 即正常）
+curl "http://127.0.0.1:8000/api/knowledge/tasks?page=1&page_size=10"
+```
+
+前端**无需改动**：照旧 `cd frontend; npm run dev`，Vite proxy 把 `/api` 转发到 `127.0.0.1:8000`，此时指向的就是容器里的后端。改 `src/` 下的后端代码，`--reload` 会自动重载。
+
+### 关键说明
+
+- **数据库是容器内独立的 PostgreSQL，不是你本机装的那个**：数据存在命名卷 `pgdata_dev`，宿主端口映射为 `127.0.0.1:5433`（避开本机 5432），两者可同时运行、互不干扰。app 通过服务名 `db` 连接（compose 的 `environment.DATABASE_URL` 覆盖了 `.env` 里的 `localhost`——容器内 `localhost` 指容器自己，连不到宿主）。
+- **全新空库**：`down -v` 会清空数据卷，重新 `up` 后需再 `alembic upgrade head` 建表。
+- **停止 / 清理**：
+  ```bash
+  docker compose -f docker-compose.dev.yml down        # 停止，保留数据卷
+  docker compose -f docker-compose.dev.yml down -v     # 停止并删除数据卷（清空开发库）
+  ```
+- **PowerShell 假报错**：`alembic` / `docker` 的正常 INFO 日志走 stderr，PowerShell 会判为错误并让 `ExitCode=1`，属假报错，以日志内容为准。
+
+> 生产部署（单容器同域 + Nginx + HTTPS，用 `Dockerfile` / `docker-compose.yml`）见 [deploy/README.md](deploy/README.md) 与 [docs/部署方案.md](docs/部署方案.md)。
 
 ---
 

@@ -4,6 +4,7 @@ import type {
   Health,
   ParseResponse,
   SupportedExtensions,
+  TaskList,
   TaskStatus,
 } from '@/types/events'
 
@@ -59,4 +60,10 @@ export function buildKnowledge(req: BuildRequest): Promise<BuildAck> {
 /** GET /api/knowledge/tasks/{task_id}(轮询兜底) */
 export function getTaskStatus(taskId: string): Promise<TaskStatus> {
   return request<TaskStatus>(`${BASE}/knowledge/tasks/${encodeURIComponent(taskId)}`)
+}
+
+/** GET /api/knowledge/tasks(历史列表,created_at 降序分页) */
+export function getTaskList(page = 1, pageSize = 10): Promise<TaskList> {
+  const qs = new URLSearchParams({ page: String(page), page_size: String(pageSize) })
+  return request<TaskList>(`${BASE}/knowledge/tasks?${qs.toString()}`)
 }

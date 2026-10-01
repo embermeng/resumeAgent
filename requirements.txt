@@ -51,3 +51,12 @@ tenacity>=8.0.0
 # 测试
 pytest>=8.0.0
 pytest-asyncio>=0.23.0
+
+sqlalchemy
+psycopg
+alembic
+greenlet
+pillow
+pwdlib[argon2]
+pydantic-settings
+pyjwt

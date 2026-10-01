@@ -10,19 +10,29 @@
 - subscribe() 生成器:先重放历史事件,再阻塞等待新事件,直到 done 帧(延迟订阅也不丢事件)。
 - 不依赖 pydantic,保持纯逻辑易测;由 router 层负责转 TaskStatus。
 """
+from datetime import datetime, UTC
 import threading
 import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
-# run_fn 签名:接受进度回调 (stage, message, percent)
+from sqlalchemy import update
+
+import logging
+
+# 数据库相关
+from src.database.database import SessionLocal
+import src.database.models as models
+
+# run_fn 签名:接受进度回调 (stage, message, percent)，并通知进度(调用 progress 即可)
 ProgressCallback = Callable[[str, str, float], None]
 RunFn = Callable[[ProgressCallback], Any]
 
 # 终止事件名(subscribe 遇到即结束)
 _TERMINAL_EVENT = "done"
 
+_log = logging.getLogger(__name__)
 
 @dataclass
 class TaskRecord:
@@ -60,6 +70,10 @@ class TaskManager:
         record = TaskRecord(task_id=task_id, task=task)
         with self._lock:
             self._tasks[task_id] = record
+        
+        # 插入一条数据库记录
+        self._insert_record(record)
+
         thread = threading.Thread(
             target=self._execute, args=(record, run_fn), daemon=True
         )
@@ -75,7 +89,8 @@ class TaskManager:
         """后台线程体:执行 run_fn,捕获进度与异常,维护状态机与事件流"""
         record.status = "running"
         record.emit("progress", {"stage": record.task, "message": "任务开始", "percent": 0})
-
+        self._update_record(record)
+        # 更新进度字段并通知
         def progress(stage: str, message: str, percent: float) -> None:
             record.stage = stage
             record.message = message
@@ -95,6 +110,7 @@ class TaskManager:
                 "status": "success",
                 "elapsed": round(time.time() - t0, 2),
             })
+            self._update_record(record)
         except Exception as e:  # noqa: BLE001 - 任务异常需转成 error 事件下发
             record.status = "failed"
             record.error = str(e)
@@ -105,6 +121,7 @@ class TaskManager:
                 "status": "failed",
                 "elapsed": round(time.time() - t0, 2),
             })
+            self._update_record(record)
 
     def subscribe(self, task_id: str, wait_timeout: float = 1.0):
         """生成器:重放历史事件 + 实时等待新事件,直到 done 帧。
@@ -128,3 +145,35 @@ class TaskManager:
                 yield ev
                 if ev["event"] == _TERMINAL_EVENT:
                     return
+
+    def _insert_record(self, record: TaskRecord) -> None:
+        try:
+            new_record = models.BuildTask(
+                task_id=record.task_id,
+                task=record.task,
+                status=record.status,
+                stage=record.stage,
+                percent=record.percent,
+                message=record.message,
+                error=record.error,
+            )
+            with SessionLocal() as db:
+                db.add(new_record)
+                db.commit()
+        except Exception:
+            _log.exception("build_task插入失败: task_id=%s", record.task_id)
+
+    def _update_record(self, record: TaskRecord) -> None:
+        try:
+            with SessionLocal() as db:
+                db.execute(update(models.BuildTask).where(models.BuildTask.task_id == record.task_id).values({
+                    "status": record.status,
+                    "stage": record.stage,
+                    "percent": record.percent,
+                    "message": record.message,
+                    "error": record.error,
+                    "finished_at": datetime.fromtimestamp(record.finished_at, tz=UTC) if record.finished_at else None,
+                }))
+                db.commit()
+        except Exception:
+            _log.exception("build_task更新失败: task_id=%s", record.task_id)

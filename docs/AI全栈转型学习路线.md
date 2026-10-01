@@ -20,8 +20,8 @@
 ## 阶段 0｜第 1~2 周：盘点、自检与代码接管
 
 - [x] 完成 Linux 七条自检（见附录 A），产出缺口清单
-- [ ] 优先补两条：systemd unit 手写、journalctl 查日志
-- [ ] 其余缺口改为问题驱动补漏（部署踩坑时定向补，不系统学课程）
+- [x] 优先补两条：systemd unit 手写、journalctl 查日志
+- [x] 其余缺口改为问题驱动补漏（部署踩坑时定向补，不系统学课程）
 
 ### 代码接管（全路线前置条件）
 
@@ -29,42 +29,42 @@
 
 方法：
 
-- [ ] 追链路画图：`POST /api/chat` 从入口到出口走一遍（app_api → routers/chat → deps → agent_service.run_stream → agent/graph → retrieval → sse 出帧），再追一条知识库入库链路
-- [ ] 逐模块一句话：说清 src/ 各目录职责（api / agent / knowledge / retrieval / schemas / prompts）
-- [ ] 用测试当文档：读 tests/test_api 与 tests/test_agent，搞懂每组测试在防什么；改一行代码让测试变红，确认那行代码的作用
-- [ ] 手写重写：不看原文重写一个小模块（sse.py 体量合适），或无 AI 辅助给现有模块加一个小接口
+- [x] 追链路画图：`POST /api/chat` 从入口到出口走一遍（app_api → routers/chat → deps → agent_service.run_stream → agent/graph → retrieval → sse 出帧），再追一条知识库入库链路
+- [x] 逐模块一句话：说清 src/ 各目录职责（api / agent / knowledge / retrieval / schemas / prompts）
+- [x] 用测试当文档：读 tests/test_api 与 tests/test_agent，搞懂每组测试在防什么；改一行代码让测试变红，确认那行代码的作用
+- [x] 手写重写：不看原文重写一个小模块（sse.py 体量合适），或无 AI 辅助给现有模块加一个小接口
 
 验收：
 
-- [ ] 能画出 POST /api/chat 完整调用链图（router 到 SSE 帧输出）
-- [ ] 随机抽 10 个 pytest，能说出各自在防什么
-- [ ] 独立（不用 AI）加一个小功能且 329 个测试全绿
+- [x] 能画出 POST /api/chat 完整调用链图（router 到 SSE 帧输出）
+- [x] 随机抽 10 个 pytest，能说出各自在防什么
+- [x] 独立（不用 AI）加一个小功能且 329 个测试全绿
 
 ## 阶段 1｜第 2~6 周：数据层
 
 ### 学习
 
-- [ ] PostgreSQL：SQL → 索引（B+ 树、失效条件）→ 事务与隔离级别
-- [ ] SQLAlchemy 2.0：session 生命周期、懒加载陷阱、N+1 问题
-- [ ] Alembic：schema 迁移管理（SQLAlchemy 的生产化伴侣）
-- [ ] Redis：旁路缓存、穿透/雪崩/过期策略
+- [x] PostgreSQL：SQL → 索引（B+ 树、失效条件）→ 事务与隔离级别
+- [x] SQLAlchemy 2.0：session 生命周期、懒加载陷阱、N+1 问题
+- [x] Alembic：schema 迁移管理（SQLAlchemy 的生产化伴侣）
+- [x] Redis：旁路缓存、穿透/雪崩/过期策略
 
 ### 落地
 
-- [ ] 对话记录与任务状态从文件系统迁入 PostgreSQL
+- [ ] 对话记录与任务状态从文件系统迁入 PostgreSQL（conversations / messages / build_tasks）
 - [ ] 检索结果加 Redis 缓存层
 
 ### 验收
 
-- [ ] 给一条慢 SQL 能说出为什么慢、索引怎么加
+- [x] 给一条慢 SQL 能说出为什么慢、索引怎么加
 - [ ] 能画出缓存与 DB 的读写时序
 
 ## 阶段 2｜第 6~10 周：认证与异步
 
 ### 学习
 
-- [ ] JWT 全链路：access/refresh 轮换、前端 token 存储安全、XSS/CSRF
-- [ ] asyncio：事件循环、信号量并发控制
+- [x] JWT 全链路：access/refresh 轮换、前端 token 存储安全、XSS/CSRF
+- [x] asyncio：事件循环、信号量并发控制
 - [ ] 后台任务：BackgroundTasks → Celery 的设计思想
 
 ### 落地
@@ -74,7 +74,7 @@
 
 ### 验收
 
-- [ ] 注册 → 登录 → 带 token 对话 → token 过期自动刷新的完整闭环跑通
+- [x] 注册 → 登录 → 带 token 对话 → token 过期自动刷新的完整闭环跑通
 - [ ] 并发多个解析任务服务不垮
 
 ## 阶段 3｜第 10~14 周：工程闭环
@@ -138,11 +138,27 @@
 能答上来 → 放心划掉；答不上来 → 只补那一条：
 
 1. 服务突然 CPU 打满或僵死，排查命令序列是什么？（top/htop → ps → kill 的信号区别）
+
 2. 端口被占用怎么定位和释放？（`ss -tlnp` 或 `lsof -i`）
-3. Docker 容器内服务日志、宿主机 systemd 服务日志分别怎么查？（`docker logs` vs `journalctl -u`）
-4. 把 Python 服务注册成开机自启、崩溃自拉的 systemd unit，能手写吗？
+
+3. ~~Docker 容器内服务日志、宿主机 systemd 服务日志分别怎么查？（`docker logs` vs `journalctl -u`）~~
+
+   docker logs --tail 200 resume-agent; journalctl -u resume-agent -f
+
+4. ~~把 Python 服务注册成开机自启、崩溃自拉的 systemd unit，能手写吗？~~
+
+   1) copy一个模板 服务名.service 放到/etc/systemd/system/下
+   2) 让 systemd 重新扫描 unit 目录（每次改文件都要做）：sudo systemctl daemon-reload
+   3) 开机自启 + 立刻启动：sudo systemctl enable --now resume-agent
+   4) 看状态：sudo systemctl status resume-agent
+   5) 跟日志确认没错：sudo journalctl -u resume-agent -f
+
 5. 磁盘「满了」但 `df -h` 显示还有空间，是什么原因？（inode 耗尽，`df -i`）
+
 6. ~~`chmod 755` 三个数字分别管谁？为什么脚本忘加执行位会报 Permission denied？~~
+
+   分别是管理员、用户组、一般用户的权限
+
 7. `.bashrc` 里加的环境变量，为什么 systemd 启动的服务读不到？
 
 优先补第 3、4 条（生产化部署必用），其余可问题驱动再补。

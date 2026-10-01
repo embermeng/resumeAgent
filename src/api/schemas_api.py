@@ -75,3 +75,10 @@ class TaskStatus(BaseModel):
     created_at: float = Field(description="创建时间(epoch 秒)")
     finished_at: Optional[float] = Field(default=None, description="结束时间(epoch 秒)")
     error: Optional[str] = Field(default=None, description="失败原因")
+
+
+class TaskList(BaseModel):
+    """任务列表(GET /api/knowledge/tasks)"""
+
+    tasks: List[TaskStatus] = Field(description="任务状态列表")
+    total: int = Field(description="任务总数")
