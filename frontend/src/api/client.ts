@@ -1,6 +1,8 @@
 import type {
   BuildAck,
   BuildRequest,
+  ConversationList,
+  ConversationMessages,
   Health,
   ParseResponse,
   SupportedExtensions,
@@ -66,4 +68,15 @@ export function getTaskStatus(taskId: string): Promise<TaskStatus> {
 export function getTaskList(page = 1, pageSize = 10): Promise<TaskList> {
   const qs = new URLSearchParams({ page: String(page), page_size: String(pageSize) })
   return request<TaskList>(`${BASE}/knowledge/tasks?${qs.toString()}`)
+}
+
+/** GET /api/conversations(历史会话列表,updated_at 降序分页) */
+export function getConversations(page = 1, pageSize = 20): Promise<ConversationList> {
+  const qs = new URLSearchParams({ page: String(page), page_size: String(pageSize) })
+  return request<ConversationList>(`${BASE}/conversations?${qs.toString()}`)
+}
+
+/** GET /api/conversations/{id}/messages(历史消息,created_at 升序) */
+export function getConversationMessages(conversationId: number): Promise<ConversationMessages> {
+  return request<ConversationMessages>(`${BASE}/conversations/${conversationId}/messages`)
 }

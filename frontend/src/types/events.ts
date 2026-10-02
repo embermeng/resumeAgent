@@ -19,6 +19,7 @@ export type TaskState = 'pending' | 'running' | 'success' | 'failed'
 
 // ---- 对话 SSE 事件(契约 4.2),type 为判别字段 ----
 export type ChatEvent =
+  | { type: 'conversation'; conversation_id: number }
   | { type: 'status'; text: string }
   | { type: 'intent'; value: Intent }
   | { type: 'token'; text: string }
@@ -44,6 +45,8 @@ export type TaskEvent =
 export interface ChatRequest {
   prompt: string
   existing_resume?: string
+  /** 归属会话 id;首条消息不传,由后端建会话并经 conversation 首帧回传 */
+  conversation_id?: number
 }
 
 export interface ParseResponse {
@@ -84,6 +87,35 @@ export interface TaskStatus {
 export interface TaskList {
   tasks: TaskStatus[]
   total: number
+}
+
+/** 会话摘要(GET /api/conversations 列表项,契约 4.9) */
+export interface ConversationSummary {
+  id: number
+  title: string
+  created_at: number
+  updated_at: number
+}
+
+/** GET /api/conversations 分页列表(updated_at 降序) */
+export interface ConversationList {
+  conversations: ConversationSummary[]
+  total: number
+}
+
+/** 历史消息(GET /api/conversations/{id}/messages 列表项,契约 4.10) */
+export interface MessageOut {
+  id: number
+  role: 'user' | 'assistant' | 'system'
+  content: string
+  intent: Intent | null
+  created_at: number
+}
+
+/** GET /api/conversations/{id}/messages 响应 */
+export interface ConversationMessages {
+  conversation_id: number
+  messages: MessageOut[]
 }
 
 export interface Health {

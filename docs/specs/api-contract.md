@@ -117,6 +117,7 @@ data: <单行 JSON>
 - 请求体:`ChatRequest`
 - 响应:`text/event-stream`,事件序列由后端 `ResumeAgent.run_stream()` 映射而来。
 - 校验:`prompt` 为空 → `422`(FastAPI/Pydantic 自动)。
+- 校验:`conversation_id` 传了但会话不存在 → `404`(在开流前校验,返回真实 404 而非 error 帧)。
 - 运行时错误 → `event: error` 帧。
 
 对话 SSE 事件协议:

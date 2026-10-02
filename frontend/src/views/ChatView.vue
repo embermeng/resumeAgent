@@ -7,6 +7,7 @@ import * as api from '@/api/client'
 import { renderMarkdown } from '@/utils/markdown'
 import ChatMessage from '@/components/ChatMessage.vue'
 import ResumeUploader from '@/components/ResumeUploader.vue'
+import ConversationHistory from '@/components/ConversationHistory.vue'
 
 const store = useChatStore()
 const { messages, streaming, existingResume } = storeToRefs(store)
@@ -17,6 +18,7 @@ const extensions = ref<string[]>(['.md', '.txt', '.docx', '.pdf'])
 const previewVisible = ref(false)
 const previewContent = ref('')
 const previewHtml = computed(() => renderMarkdown(previewContent.value))
+const historyVisible = ref(false)
 
 onMounted(async () => {
   try {
@@ -120,6 +122,7 @@ function onDownload(markdown: string) {
             <el-button data-test="clear-btn" :disabled="!messages.length" @click="store.clear()">
               清空
             </el-button>
+            <el-button data-test="history-btn" @click="historyVisible = true">历史</el-button>
           </div>
         </div>
       </div>
@@ -138,6 +141,17 @@ function onDownload(markdown: string) {
         <el-button type="primary" @click="onDownload(previewContent)">下载 Markdown</el-button>
       </template>
     </el-dialog>
+
+    <!-- 历史会话抽屉;teleported=false 保持 DOM 在组件树内,便于测试定位 -->
+    <el-drawer
+      v-model="historyVisible"
+      title="历史会话"
+      direction="ltr"
+      size="320px"
+      :teleported="false"
+    >
+      <ConversationHistory @opened="historyVisible = false" />
+    </el-drawer>
   </div>
 </template>
 

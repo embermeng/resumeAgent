@@ -22,11 +22,15 @@ TaskState = Literal["pending", "running", "success", "failed"]
 
 # 意图类型(对齐 run_stream 的 intent 事件)
 Intent = Literal["quick_response", "deep_thinking", "chitchat"]
-
+# 消息角色
+MessageRole = Literal["user", "assistant", "system"]
 
 class ChatRequest(BaseModel):
     """流式对话请求(POST /api/chat)"""
 
+    conversation_id: Optional[int] = Field(
+        default=None, description="对话 ID,不传则自动生成"
+    )
     prompt: str = Field(min_length=1, description="用户输入,非空")
     existing_resume: Optional[str] = Field(
         default=None, description="已有简历 Markdown 文本,深思路径生成时作为事实骨架"
@@ -82,3 +86,36 @@ class TaskList(BaseModel):
 
     tasks: List[TaskStatus] = Field(description="任务状态列表")
     total: int = Field(description="任务总数")
+
+
+class ConversationSummary(BaseModel):
+    """单个对话摘要"""
+
+    id: int = Field(description="对话 ID")
+    title: str = Field(description="对话标题")
+    created_at: float = Field(description="创建时间(epoch 秒)")
+    updated_at: float = Field(description="更新时间(epoch 秒)")
+
+
+class ConversationList(BaseModel):
+    """对话列表(GET /api/conversations)"""
+
+    conversations: List[ConversationSummary] = Field(description="对话摘要列表")
+    total: int = Field(description="对话总数")
+
+
+class MessageOut(BaseModel):
+    """对话消息"""
+
+    id: int = Field(description="消息 ID")
+    role: MessageRole = Field(description="消息角色")
+    content: str = Field(description="消息内容")
+    intent: Optional[Intent] = Field(default=None, description="消息意图(仅 assistant 消息有值)")
+    created_at: float = Field(description="创建时间(epoch 秒)")
+
+
+class ConversationMessages(BaseModel):
+    """对话消息列表 GET /api/conversations/{id}/messages"""
+    
+    conversation_id: int = Field(description="对话 ID")
+    messages: List[MessageOut] = Field(description="消息列表")

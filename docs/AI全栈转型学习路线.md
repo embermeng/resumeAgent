@@ -51,7 +51,7 @@
 
 ### 落地
 
-- [ ] 对话记录与任务状态从文件系统迁入 PostgreSQL（conversations / messages / build_tasks）
+- [x] 对话记录与任务状态从文件系统迁入 PostgreSQL（conversations / messages / build_tasks）
 - [ ] 检索结果加 Redis 缓存层
 
 ### 验收

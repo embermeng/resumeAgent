@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest'
-import { createSSEParser } from './sse'
+import { describe, it, expect, vi } from 'vitest'
+import { createSSEParser, createEventDispatcher } from './sse'
 import type { SSEFrame } from '@/types/events'
 
 const enc = new TextEncoder()
@@ -74,5 +74,34 @@ describe('createSSEParser', () => {
     expect(frames).toHaveLength(0)
     parser.flush()
     expect(frames).toEqual([{ event: 'done', data: '{"status":"success"}' }])
+  })
+})
+
+describe('createEventDispatcher', () => {
+  it('DEV 下每帧无损打印到 console.log(含首帧)且正常派发', () => {
+    const debug = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const events: { type: string }[] = []
+    const dispatch = createEventDispatcher(() => {}, (e) => events.push(e))
+    dispatch({ event: 'conversation', data: '{"conversation_id":5}' })
+    dispatch({ event: 'token', data: '{"text":"hi"}' })
+    expect(debug.mock.calls.map((c) => [c[1], c[2]])).toEqual([
+      ['conversation', '{"conversation_id":5}'],
+      ['token', '{"text":"hi"}'],
+    ])
+    expect(events.map((e) => e.type)).toEqual(['conversation', 'token'])
+    debug.mockRestore()
+  })
+
+  it('非法 JSON 帧仍先打印原始帧再报错(日志无损不受解析失败影响)', () => {
+    const debug = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const errors: string[] = []
+    const events: { type: string }[] = []
+    const dispatch = createEventDispatcher((m) => errors.push(m), (e) => events.push(e))
+    dispatch({ event: 'token', data: '{bad json' })
+    expect(debug).toHaveBeenCalledTimes(1)
+    expect(debug.mock.calls[0][1]).toBe('token')
+    expect(errors).toHaveLength(1)
+    expect(events.map((e) => e.type)).toEqual(['error'])
+    debug.mockRestore()
   })
 })

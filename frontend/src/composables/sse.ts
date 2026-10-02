@@ -107,6 +107,10 @@ export function createEventDispatcher<TEvent extends { type: string }>(
   onEvent: (event: TEvent) => void,
 ): (frame: SSEFrame) => void {
   return (frame) => {
+    // 开发期页面级无损帧日志:DevTools 网络记录可能漏掉流式响应的首 chunk
+    // (EventStream 与响应标签都受影响),控制台是唯一能看到页面实收全部帧的视图;
+    // 用 log 而非 debug:debug 属 Verbose 级别,控制台默认隐藏
+    if (import.meta.env.DEV) console.log('[sse] frame', frame.event, frame.data)
     let evt: TEvent
     try {
       evt = frameToEvent<TEvent>(frame)
