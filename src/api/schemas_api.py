@@ -4,8 +4,8 @@ API 层请求/响应数据模型
 契约见 docs/specs/api-contract.md 第 2 节,与前端 frontend/src/types/events.ts 一一对应。
 """
 from typing import List, Literal, Optional
-
-from pydantic import BaseModel, Field
+from datetime import datetime
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 # 构建任务类型(对应现有 CLI 命令)
 TaskKind = Literal[
@@ -24,6 +24,7 @@ TaskState = Literal["pending", "running", "success", "failed"]
 Intent = Literal["quick_response", "deep_thinking", "chitchat"]
 # 消息角色
 MessageRole = Literal["user", "assistant", "system"]
+
 
 class ChatRequest(BaseModel):
     """流式对话请求(POST /api/chat)"""
@@ -77,7 +78,8 @@ class TaskStatus(BaseModel):
     percent: Optional[float] = Field(default=None, description="进度百分比 0-100")
     message: Optional[str] = Field(default=None, description="最新进度文本")
     created_at: float = Field(description="创建时间(epoch 秒)")
-    finished_at: Optional[float] = Field(default=None, description="结束时间(epoch 秒)")
+    finished_at: Optional[float] = Field(
+        default=None, description="结束时间(epoch 秒)")
     error: Optional[str] = Field(default=None, description="失败原因")
 
 
@@ -110,12 +112,49 @@ class MessageOut(BaseModel):
     id: int = Field(description="消息 ID")
     role: MessageRole = Field(description="消息角色")
     content: str = Field(description="消息内容")
-    intent: Optional[Intent] = Field(default=None, description="消息意图(仅 assistant 消息有值)")
+    intent: Optional[Intent] = Field(
+        default=None, description="消息意图(仅 assistant 消息有值)")
     created_at: float = Field(description="创建时间(epoch 秒)")
 
 
 class ConversationMessages(BaseModel):
     """对话消息列表 GET /api/conversations/{id}/messages"""
-    
+
     conversation_id: int = Field(description="对话 ID")
     messages: List[MessageOut] = Field(description="消息列表")
+
+
+class UserBase(BaseModel):
+    username: str = Field(min_length=1, max_length=50)
+    email: EmailStr = Field(max_length=120)
+
+
+class UserCreate(UserBase):
+    password: str = Field(min_length=8)
+
+
+class UserLoginReq(BaseModel):
+    email: EmailStr = Field(max_length=120)
+    password: str = Field(min_length=8)
+
+
+class UserPublic(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    username: str
+
+
+class UserPrivate(UserPublic):
+    email: EmailStr
+
+
+class UserUpdate(BaseModel):
+    username: str | None = Field(default=None, min_length=1, max_length=50)
+    email: EmailStr | None = Field(default=None, max_length=120)
+
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+

@@ -60,3 +60,4 @@ pillow
 pwdlib[argon2]
 pydantic-settings
 pyjwt
+email-validator

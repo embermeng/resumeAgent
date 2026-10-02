@@ -141,21 +141,30 @@ class DatabaseConfig:
 
 
 @dataclass
-class SecretStr:
+class AuthConfig:
     """密钥配置"""
     secret_key: str = os.getenv("SECRET_KEY", "")
+    algorithm: str = "HS256"
+    # 测试完后改为30分钟
+    access_token_expire_minutes: int = 1
+    refresh_token_expire_minutes: int = 7 * 24 * 60
+
 
 @dataclass
 class AppConfig:
     """应用总配置，聚合所有子配置"""
     paths: PathConfig = field(default_factory=PathConfig)
     llm: LLMConfig = field(default_factory=LLMConfig.from_env)
-    embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig.from_env)
+    embedding: EmbeddingConfig = field(
+        default_factory=EmbeddingConfig.from_env)
     retrieval: RetrievalConfig = field(default_factory=RetrievalConfig)
     database: DatabaseConfig = field(default_factory=DatabaseConfig)
-    secret: SecretStr = field(default_factory=SecretStr)
+    auth: AuthConfig = field(default_factory=AuthConfig)
+
     def __post_init__(self):
         self.paths.ensure_dirs()
+        if not self.auth.secret_key:
+            raise RuntimeError("SECRET_KEY not set")
 
 
 # 全局单例

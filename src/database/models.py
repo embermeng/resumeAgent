@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, Float
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, Float, Boolean
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from src.database.database import Base
@@ -13,6 +13,11 @@ class Conversation(Base):
     __tablename__ = "conversations"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     title: Mapped[str] = mapped_column(String(50), nullable=False)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id"),
+        nullable=False,
+        index=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(UTC),
@@ -24,6 +29,7 @@ class Conversation(Base):
     )
     messages: Mapped[list[Message]] = relationship(
         back_populates="conversation", cascade="all, delete-orphan")
+    owner: Mapped[User] = relationship(back_populates="conversations")
 
 
 # 消息记录
@@ -72,3 +78,49 @@ class BuildTask(Base):
         DateTime(timezone=True),
         nullable=True,
     )
+
+
+# 用户
+class User(Base):
+    __tablename__ = "users"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    username: Mapped[str] = mapped_column(String(50), nullable=False, unique=True, index=True)
+    email: Mapped[str] = mapped_column(String(120), unique=True, nullable=False)
+    password_hash: Mapped[str] = mapped_column(String(200), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+    )
+    conversations: Mapped[list[Conversation]] = relationship(
+        back_populates="owner",
+        cascade="all, delete-orphan",
+    )
+    refresh_tokens: Mapped[list[RefreshToken]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
+
+
+class RefreshToken(Base):
+    __tablename__ = "refresh_tokens"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id"),
+        nullable=False,
+    )
+    jti: Mapped[str] = mapped_column(
+        String(36), nullable=False, unique=True, index=True)
+    family_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    revoked: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+    )
+    expire_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+    )
+    user: Mapped[User] = relationship(back_populates="refresh_tokens")
