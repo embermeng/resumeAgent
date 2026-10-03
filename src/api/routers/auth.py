@@ -112,7 +112,7 @@ async def login_for_access_token(
         httponly=True,
         path="/api/auth",
         samesite="strict",
-        secure=False,
+        secure=settings.auth.cookie_secure,
         max_age=settings.auth.refresh_token_expire_minutes * 60,
     )
     return Token(access_token=access_token, token_type="bearer")
@@ -188,7 +188,7 @@ async def refresh_token(
         httponly=True,
         path="/api/auth",
         samesite="strict",
-        secure=False,
+        secure=settings.auth.cookie_secure,
         max_age=settings.auth.refresh_token_expire_minutes * 60,
     )
     return Token(access_token=new_access_token, token_type="bearer")

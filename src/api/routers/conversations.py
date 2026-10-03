@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.auth.security import CurrentUser
 from src.api.schemas_api import (
     ConversationList,
     ConversationSummary,
@@ -23,13 +24,15 @@ router = APIRouter()
 @router.get("/conversations", response_model=ConversationList)
 async def conversation_list(
     db: Annotated[AsyncSession, Depends(get_async_session)],
+    current_user: CurrentUser,
     page: Annotated[int, Query(description="页码", ge=1)] = 1,
     page_size: Annotated[int, Query(description="每页大小", ge=1, le=100)] = 20,
 ):
     """会话列表分页(降序)。"""
-    total = (await db.execute(select(func.count()).select_from(models.Conversation))).scalar() or 0
+    total = (await db.execute(select(func.count()).select_from(models.Conversation).where(models.Conversation.user_id == current_user.id))).scalar() or 0
     result = await db.execute(
         select(models.Conversation)
+        .where(models.Conversation.user_id == current_user.id)
         .order_by(models.Conversation.updated_at.desc())
         .offset((page - 1) * page_size)
         .limit(page_size),
@@ -48,6 +51,7 @@ async def conversation_list(
 @router.get("/conversations/{conversation_id}/messages", response_model=ConversationMessages)
 async def conversation_messages(
     conversation_id: int,
+    current_user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_async_session)],
 ):
     """会话消息列表。"""
@@ -55,7 +59,7 @@ async def conversation_messages(
         select(models.Conversation).where(
             models.Conversation.id == conversation_id)
     )).scalars().first()
-    if conv is None:
+    if conv is None or conv.user_id != current_user.id:
         raise HTTPException(status_code=404, detail="conversation not found")
     result = await db.execute(
         select(models.Message)

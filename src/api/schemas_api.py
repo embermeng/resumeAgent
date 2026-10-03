@@ -158,3 +158,22 @@ class Token(BaseModel):
     access_token: str
     token_type: str
 
+
+class ResumeParseAck(BaseModel):
+    """简历解析任务受理(POST /api/resume/parse, 202)"""
+    task_id: str = Field(description="任务唯一 ID")
+    status: TaskState = Field(description="受理时为 pending")
+
+
+class ResumeParseStatus(BaseModel):
+    """简历解析任务状态/结果(GET /api/resume/parse/{task_id})。不含 task 字段。"""
+    task_id: str = Field(description="任务唯一 ID")
+    status: TaskState = Field(description="任务状态")
+    stage: Optional[str] = Field(default=None)
+    percent: Optional[float] = Field(default=None)
+    message: Optional[str] = Field(default=None)
+    filename: Optional[str] = Field(default=None, description="上传的原始文件名")
+    content: Optional[str] = Field(default=None, description="解析出的 Markdown,仅 success 返回")
+    error: Optional[str] = Field(default=None)
+    created_at: float = Field(description="创建时间(epoch 秒)")
+    finished_at: Optional[float] = Field(default=None)

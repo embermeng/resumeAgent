@@ -7,9 +7,9 @@ import src.database.models as models
 
 _log = logging.getLogger(__name__)
 
-def create_conversation(title: str) -> int | None:
+def create_conversation(title: str, user_id: int) -> int | None:
     try:
-        new_record = models.Conversation(title=title[:50])
+        new_record = models.Conversation(title=title[:50], user_id=user_id)
         with SessionLocal() as db:
             db.add(new_record)
             db.commit()
@@ -34,11 +34,11 @@ def add_message(
         _log.exception("message插入失败: conversation_id=%s, role=%s, content=%s, intent=%s", conversation_id, role, content, intent)
 
 
-def check_conversation(conversation_id: int) -> bool:
+def check_conversation(conversation_id: int, user_id: int) -> bool:
     try:
         with SessionLocal() as db:
-            result = db.execute(select(models.Conversation).where(models.Conversation.id == conversation_id))
+            result = db.execute(select(models.Conversation).where(models.Conversation.id == conversation_id, models.Conversation.user_id == user_id))
             return result.scalars().first() is not None
     except Exception:
-        _log.exception("检查conversation失败: conversation_id=%s", conversation_id)
+        _log.exception("检查conversation失败: conversation_id=%s, user_id=%s", conversation_id, user_id)
         return False

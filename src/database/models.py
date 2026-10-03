@@ -58,6 +58,10 @@ class BuildTask(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     task_id: Mapped[str] = mapped_column(
         String(50), nullable=False, unique=True, index=True)
+    user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     # 任务类型
     task: Mapped[str] = mapped_column(String(50), nullable=False)
     # 任务状态
@@ -70,6 +74,10 @@ class BuildTask(Base):
     message: Mapped[str | None] = mapped_column(Text, nullable=True)
     # 失败原因
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 解析简历结果路径
+    result_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 简历文件名
+    filename: Mapped[str | None] = mapped_column(String(200), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(UTC),

@@ -153,4 +153,4 @@ class ResumeFileParser:
                 return self.pdf_parser.parse_single(tmp_path)
             except Exception as e:
                 _log.error(f"简历PDF解析失败: {file_name}, error={e}")
-                raise ValueError(f"简历PDF解析失败: {file_name}") from e
+                raise ValueError(f"简历PDF解析失败: {file_name}: {e}") from e

@@ -7,13 +7,26 @@
 - 空 prompt -> 422
 - 服务异常 -> error 帧
 """
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
 from fastapi.testclient import TestClient
 
 from src.api.app import create_app
 from src.api.deps import get_agent_service
+from src.auth.security import get_current_user
 from tests.test_api.helpers import event_names, parse_sse
+
+
+@pytest.fixture(autouse=True)
+def _stub_dialog(monkeypatch):
+    """解耦真实 DB:chat 现在会建会话/写消息(且需 user_id 归属)。
+    将这些副作用打桩,让 SSE 映射测试专注事件转换本身。
+    create_conversation 返回 None 时 chat 会跳过 conversation 帧与落库,符合断言预期。"""
+    monkeypatch.setattr("src.api.routers.chat.create_conversation", lambda *a, **k: None)
+    monkeypatch.setattr("src.api.routers.chat.add_message", lambda *a, **k: None)
+    monkeypatch.setattr("src.api.routers.chat.check_conversation", lambda *a, **k: True)
 
 
 def _client(events=None, side_effect=None):
@@ -24,6 +37,8 @@ def _client(events=None, side_effect=None):
     else:
         fake.run_stream.return_value = iter(events or [])
     app.dependency_overrides[get_agent_service] = lambda: fake
+    # chat 现需鉴权:注入一个假登录用户(id=1),免走真实 token/DB
+    app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id=1)
     return TestClient(app), fake
 
 

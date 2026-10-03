@@ -15,11 +15,11 @@ describe('api/client', () => {
     expect(fetchMock.mock.calls[0][0]).toBe('/api/resume/supported-extensions')
   })
 
-  it('parseResume:以 multipart 上传 file 字段,POST /api/resume/parse', async () => {
-    const fetchMock = stubFetch(async () => jsonResponse({ filename: 'a.md', content: '# A' }))
+  it('parseResume:multipart 上传 file,POST /api/resume/parse,返回 202 回执(task_id)', async () => {
+    const fetchMock = stubFetch(async () => jsonResponse({ task_id: 't1', status: 'pending' }, { status: 202 }))
     const file = new File(['# A'], 'a.md', { type: 'text/markdown' })
     const res = await client.parseResume(file)
-    expect(res).toEqual({ filename: 'a.md', content: '# A' })
+    expect(res).toEqual({ task_id: 't1', status: 'pending' })
 
     const [url, opts] = fetchMock.mock.calls[0]
     expect(url).toBe('/api/resume/parse')
@@ -28,6 +28,16 @@ describe('api/client', () => {
     const sent = (opts?.body as FormData).get('file')
     expect(sent).toBeInstanceOf(File)
     expect((sent as File).name).toBe('a.md')
+  })
+
+  it('getResumeParseStatus:GET /api/resume/parse/{id},task_id URL 编码,success 带 content', async () => {
+    const fetchMock = stubFetch(async () =>
+      jsonResponse({ task_id: 'a/b', status: 'success', filename: 'a.md', content: '# A', created_at: 100 }),
+    )
+    const res = await client.getResumeParseStatus('a/b')
+    expect(res.status).toBe('success')
+    expect(res.content).toBe('# A')
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/resume/parse/a%2Fb')
   })
 
   it('buildKnowledge:POST JSON,返回 task_id/status', async () => {

@@ -34,7 +34,7 @@ export type ChatEvent =
     }
   | { type: 'error'; message: string }
 
-// ---- 任务 SSE 事件(契约 4.6),type 为判别字段 ----
+// ---- 任务 SSE 事件(知识库契约 4.8;简历解析流复用同协议,契约 4.5),type 为判别字段 ----
 export type TaskEvent =
   | { type: 'progress'; stage: string; message: string; percent: number }
   | { type: 'log'; line: string }
@@ -52,6 +52,32 @@ export interface ChatRequest {
 export interface ParseResponse {
   filename: string
   content: string
+}
+
+/**
+ * POST /api/resume/parse 回执(契约 4.3):提交后台解析任务后返回。
+ * 异步化后不再同步返回解析内容,内容改经 ResumeParseStatus.content 下发。
+ */
+export interface ResumeParseAck {
+  task_id: string
+  status: TaskState
+}
+
+/**
+ * GET /api/resume/parse/{task_id} 快照(契约 4.4)。
+ * 不含 task 字段(与知识库 TaskStatus 区分);status==='success' 时带 content。
+ */
+export interface ResumeParseStatus {
+  task_id: string
+  status: TaskState
+  stage?: string
+  percent?: number
+  message?: string
+  filename?: string
+  content?: string
+  error?: string
+  created_at: number
+  finished_at?: number
 }
 
 export interface SupportedExtensions {
@@ -89,7 +115,7 @@ export interface TaskList {
   total: number
 }
 
-/** 会话摘要(GET /api/conversations 列表项,契约 4.9) */
+/** 会话摘要(GET /api/conversations 列表项,契约 4.11) */
 export interface ConversationSummary {
   id: number
   title: string
@@ -103,7 +129,7 @@ export interface ConversationList {
   total: number
 }
 
-/** 历史消息(GET /api/conversations/{id}/messages 列表项,契约 4.10) */
+/** 历史消息(GET /api/conversations/{id}/messages 列表项,契约 4.12) */
 export interface MessageOut {
   id: number
   role: 'user' | 'assistant' | 'system'
@@ -120,6 +146,44 @@ export interface ConversationMessages {
 
 export interface Health {
   status: string
+}
+
+// ---- 认证模型(契约 2.1 / 4.13~4.20) ----
+
+/** POST /api/auth/register 请求体 */
+export interface UserCreate {
+  username: string
+  email: string
+  password: string
+}
+
+/** POST /api/auth/login 请求体(登录凭证为 email) */
+export interface UserLoginReq {
+  email: string
+  password: string
+}
+
+/** 登录/刷新响应体(refresh token 只经 httpOnly cookie 下发,不在此) */
+export interface Token {
+  access_token: string
+  token_type: string
+}
+
+/** 用户公开视图(GET /api/auth/user/{id},不含 email) */
+export interface UserPublic {
+  id: number
+  username: string
+}
+
+/** 用户完整视图(register/me/patch 响应) */
+export interface UserPrivate extends UserPublic {
+  email: string
+}
+
+/** PATCH /api/auth/{id} 请求体(字段均可省略,只改提供的) */
+export interface UserUpdate {
+  username?: string
+  email?: string
 }
 
 /**

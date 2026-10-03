@@ -34,9 +34,13 @@ python-dotenv>=1.0.1
 # Token计数
 tiktoken>=0.8.0
 
-# PDF解析（MinerU）
-# 注意：需先单独安装 CUDA 版 PyTorch（RTX 50系Blackwell显卡必需）：
+# PDF解析
+# - 简历 PDF 解析（parse_single）：调用 MinerU 官方 Agent 轻量 API（免 token），仅需 requests，无需本地 MinerU
+# - 知识库课程 PDF 批量构建（parse_batch）：仍走本地 MinerU（需 GPU，超轻量 API 20 页限制），仅本地构建知识库时需要；
+#   需先单独安装 CUDA 版 PyTorch（RTX 50系Blackwell显卡必需）：
 #   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130
+#   云端不构建知识库，故 requirements-prod.txt 不含 mineru[core]
+requests>=2.31.0
 mineru[core]>=2.7.0
 
 # 工具

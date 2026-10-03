@@ -76,6 +76,10 @@ class PathConfig:
     def bm25_dbs_dir(self) -> Path:
         return self.databases_dir / "bm25_dbs"
 
+    @property
+    def resume_uploads_dir(self) -> Path:
+        return self.processed_dir / "resume_uploads"
+
     def ensure_dirs(self):
         """确保所有数据目录存在"""
         for dir_path in [
@@ -88,6 +92,7 @@ class PathConfig:
             self.course_summaries_dir,
             self.vector_dbs_dir,
             self.bm25_dbs_dir,
+            self.resume_uploads_dir,
         ]:
             dir_path.mkdir(parents=True, exist_ok=True)
 
@@ -145,9 +150,37 @@ class AuthConfig:
     """密钥配置"""
     secret_key: str = os.getenv("SECRET_KEY", "")
     algorithm: str = "HS256"
-    # 测试完后改为30分钟
-    access_token_expire_minutes: int = 1
+    access_token_expire_minutes: int = 60
     refresh_token_expire_minutes: int = 7 * 24 * 60
+    cookie_secure: bool = False
+
+
+@dataclass
+class SemaphoreConfig:
+    """信号量配置"""
+    resume_parse_max_concurrency: int = int(os.getenv("RESUME_PARSE_MAX_CONCURRENCY", 1))
+
+
+@dataclass
+class MinerUConfig:
+    """
+    MinerU 官方 Agent 轻量解析 API 配置（免 token，IP 限频）
+    简历 PDF 解析走此远程 API，云端/本地均无需部署 MinerU。
+    注意：知识库课程 PDF 批量构建仍走本地 MinerU（超轻量 API 20 页限制），不受此配置影响。
+    """
+    api_base: str = os.getenv("MINERU_API_BASE", "https://mineru.net/api/v1/agent")
+    language: str = os.getenv("MINERU_LANGUAGE", "ch")
+    enable_table: bool = os.getenv("MINERU_ENABLE_TABLE", "true").lower() == "true"
+    enable_formula: bool = os.getenv("MINERU_ENABLE_FORMULA", "true").lower() == "true"
+    is_ocr: bool = os.getenv("MINERU_IS_OCR", "false").lower() == "true"
+    # 单次 HTTP 请求超时（秒）
+    request_timeout: int = int(os.getenv("MINERU_REQUEST_TIMEOUT", 60))
+    # 轮询解析结果的总超时（秒）与轮询间隔（秒）
+    poll_timeout: int = int(os.getenv("MINERU_POLL_TIMEOUT", 300))
+    poll_interval: float = float(os.getenv("MINERU_POLL_INTERVAL", 3))
+    # HTTP 自动重试：应对 CDN/API 偶发 TLS 中断(SSL EOF)、连接超时、5xx/429
+    max_retries: int = int(os.getenv("MINERU_MAX_RETRIES", 4))
+    retry_backoff: float = float(os.getenv("MINERU_RETRY_BACKOFF", 1.0))
 
 
 @dataclass
@@ -160,6 +193,8 @@ class AppConfig:
     retrieval: RetrievalConfig = field(default_factory=RetrievalConfig)
     database: DatabaseConfig = field(default_factory=DatabaseConfig)
     auth: AuthConfig = field(default_factory=AuthConfig)
+    semaphore: SemaphoreConfig = field(default_factory=SemaphoreConfig)
+    mineru: MinerUConfig = field(default_factory=MinerUConfig)
 
     def __post_init__(self):
         self.paths.ensure_dirs()

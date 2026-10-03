@@ -2,8 +2,10 @@ import { describe, it, expect, afterEach } from 'vitest'
 import { useTaskStream } from './useTaskStream'
 import type { TaskEvent } from '@/types/events'
 import { sseResponse, stubFetch } from '@/test/sse-helpers'
+import { setAccessToken } from '@/api/authToken'
 
 afterEach(() => {
+  setAccessToken(null)
   vi.unstubAllGlobals()
   vi.restoreAllMocks()
 })
@@ -69,5 +71,35 @@ describe('useTaskStream', () => {
     await start('missing')
     expect(error.value).toContain('404')
     expect(events.some((e) => e.type === 'error')).toBe(true)
+  })
+
+  it('自定义 url 解析器:用于简历解析流地址(契约 4.5)', async () => {
+    const fetchMock = stubFetch(async () =>
+      sseResponse(['event: done\ndata: {"task_id":"r1","status":"success","elapsed":1}\n\n']),
+    )
+    const { start } = useTaskStream({
+      url: (id) => `/api/resume/parse/${encodeURIComponent(id)}/stream`,
+    })
+    await start('r1')
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/resume/parse/r1/stream')
+  })
+
+  it('有 token 时开流注入 Authorization + credentials:include', async () => {
+    setAccessToken('h.!!!.s') // decodeExp 无法解析 → ensureFreshToken 不触发刷新请求
+    const fetchMock = stubFetch(async () => sseResponse([]))
+    const { start } = useTaskStream()
+    await start('t1')
+    const [, opts] = fetchMock.mock.calls[0]
+    expect(opts?.credentials).toBe('include')
+    expect((opts?.headers as Record<string, string>).Authorization).toBe('Bearer h.!!!.s')
+  })
+
+  it('无 token 时不带 Authorization,但仍 credentials:include(开放流兼容)', async () => {
+    const fetchMock = stubFetch(async () => sseResponse([]))
+    const { start } = useTaskStream()
+    await start('t1')
+    const [, opts] = fetchMock.mock.calls[0]
+    expect(opts?.credentials).toBe('include')
+    expect((opts?.headers as Record<string, string>).Authorization).toBeUndefined()
   })
 })

@@ -1,12 +1,16 @@
 """
 PDF解析模块
-使用MinerU本地解析（pipeline后端，GPU加速），将PDF转换为Markdown文本
-MinerU 3.x API入口为 mineru.cli.common.do_parse
+- 简历单文件解析（parse_single）：调用 MinerU 官方 Agent 轻量 API（免 token，远程），
+  云端/本地均无需部署 MinerU；用 requests 同步 HTTP，跑在后台任务线程不碰事件循环。
+- 知识库课程 PDF 批量构建（parse_batch / parse_and_export_json）：仍用本地 MinerU
+  （mineru.cli.common.do_parse，pipeline 后端），因课程 PDF 常超轻量 API 的 20 页限制，
+  且知识库仅在本地构建、云端复用已构建产物。
 """
 import json
 import logging
 import re
 import tempfile
+import time
 from pathlib import Path
 from typing import List, Optional
 
@@ -78,18 +82,127 @@ class PDFParser:
     def parse_single(self, pdf_path: Path) -> str:
         """
         解析单个PDF文件，返回Markdown文本
+        通过 MinerU 官方 Agent 轻量 API（免 token）远程解析：
+          1. POST /agent/parse/file   -> task_id + 签名上传 URL(file_url)
+          2. PUT  file_url            -> 上传文件字节
+          3. GET  /agent/parse/{id}   -> 轮询直到 done/failed，done 返回 markdown_url
+          4. GET  markdown_url        -> 下载 Markdown 文本
+        该限制：≤ 10MB、≤ 20 页、单文件；IP 限频超限返回 HTTP 429。
         """
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            try:
-                self._run_mineru(Path(tmp_dir), [pdf_path])
-                markdown_text = self._read_markdown(Path(tmp_dir), pdf_path.stem)
-            except Exception as e:
-                _log.error(f"MinerU解析失败: {pdf_path.name}, error={e}")
-                raise RuntimeError(f"PDF解析失败: {pdf_path.name}") from e
+        import requests
+        from src.config import get_config
 
+        cfg = get_config().mineru
+        session = self._build_retry_session(requests, cfg)
+        try:
+            task_id, file_url = self._agent_create_task(session, cfg, pdf_path)
+            self._agent_upload(session, cfg, file_url, pdf_path)
+            markdown_url = self._agent_poll(session, cfg, task_id)
+            markdown_text = self._agent_download(session, cfg, markdown_url)
+        except Exception as e:
+            _log.error(f"MinerU API解析失败: {pdf_path.name}, error={e}")
+            raise ValueError(f"简历PDF解析失败: {pdf_path.name}: {e}") from e
+        finally:
+            session.close()
+
+        markdown_text = self._clean_markdown(markdown_text)
         if not markdown_text.strip():
             raise RuntimeError(f"PDF解析结果为空: {pdf_path.name}")
         return markdown_text
+
+    # ---------- MinerU Agent 轻量 API（免 token）内部实现 ----------
+
+    @staticmethod
+    def _build_retry_session(requests, cfg):
+        """
+        构造带自动退避重试的 Session：CDN/API 偶发 TLS 中断(SSL EOF)、
+        连接/读取超时、5xx 与 429 限频时由 urllib3 Retry 自动重试，避免瞬时网络抖动导致解析失败。
+        """
+        from requests.adapters import HTTPAdapter
+        from urllib3.util.retry import Retry
+
+        retry = Retry(
+            total=cfg.max_retries,
+            connect=cfg.max_retries,
+            read=cfg.max_retries,
+            status=cfg.max_retries,
+            other=cfg.max_retries,
+            backoff_factor=cfg.retry_backoff,
+            status_forcelist=(429, 500, 502, 503, 504),
+            allowed_methods=frozenset(["GET", "POST", "PUT"]),
+            raise_on_status=False,
+        )
+        adapter = HTTPAdapter(max_retries=retry)
+        session = requests.Session()
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
+        return session
+
+    @staticmethod
+    def _agent_create_task(session, cfg, pdf_path: Path):
+        """第一步：创建解析任务，返回 (task_id, file_url)"""
+        url = f"{cfg.api_base}/parse/file"
+        payload = {
+            "file_name": pdf_path.name,
+            "language": cfg.language,
+            "enable_table": cfg.enable_table,
+            "enable_formula": cfg.enable_formula,
+            "is_ocr": cfg.is_ocr,
+        }
+        resp = session.post(url, json=payload, timeout=cfg.request_timeout)
+        if resp.status_code == 429:
+            raise RuntimeError("MinerU Agent API 触发 IP 限频(429)，请稍后重试")
+        resp.raise_for_status()
+        body = resp.json()
+        if body.get("code") != 0:
+            raise RuntimeError(f"创建解析任务失败: code={body.get('code')}, msg={body.get('msg')}")
+        data = body.get("data") or {}
+        task_id = data.get("task_id")
+        file_url = data.get("file_url")
+        if not task_id or not file_url:
+            raise RuntimeError(f"创建解析任务响应缺少 task_id/file_url: {body}")
+        return task_id, file_url
+
+    @staticmethod
+    def _agent_upload(session, cfg, file_url: str, pdf_path: Path) -> None:
+        """第二步：PUT 文件字节到签名上传 URL（不带 Content-Type）"""
+        with open(pdf_path, "rb") as f:
+            resp = session.put(file_url, data=f, timeout=cfg.request_timeout)
+        if resp.status_code not in (200, 201):
+            raise RuntimeError(f"文件上传失败: HTTP {resp.status_code}")
+
+    @staticmethod
+    def _agent_poll(session, cfg, task_id: str) -> str:
+        """第三步：轮询解析状态，done 返回 markdown_url，failed/超时抛异常"""
+        url = f"{cfg.api_base}/parse/{task_id}"
+        deadline = time.monotonic() + cfg.poll_timeout
+        last_state = None
+        while True:
+            resp = session.get(url, timeout=cfg.request_timeout)
+            resp.raise_for_status()
+            body = resp.json()
+            if body.get("code") != 0:
+                raise RuntimeError(f"查询解析结果失败: code={body.get('code')}, msg={body.get('msg')}")
+            data = body.get("data") or {}
+            last_state = data.get("state")
+            if last_state == "done":
+                markdown_url = data.get("markdown_url")
+                if not markdown_url:
+                    raise RuntimeError(f"解析完成但缺少 markdown_url: {data}")
+                return markdown_url
+            if last_state == "failed":
+                err = data.get("err_msg") or data.get("err_code") or "未知错误"
+                raise RuntimeError(f"MinerU 解析失败: {err}")
+            if time.monotonic() >= deadline:
+                raise RuntimeError(f"MinerU 解析超时（{cfg.poll_timeout}s），最后状态: {last_state}")
+            time.sleep(cfg.poll_interval)
+
+    @staticmethod
+    def _agent_download(session, cfg, markdown_url: str) -> str:
+        """第四步：下载 markdown_url（CDN 链接）的 Markdown 文本"""
+        resp = session.get(markdown_url, timeout=cfg.request_timeout)
+        resp.raise_for_status()
+        return resp.text
 
     def parse_batch(
         self,

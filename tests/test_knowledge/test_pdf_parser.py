@@ -2,6 +2,7 @@
 PDFParser 测试
 使用Mock避免依赖真实的MinerU库（GPU模型加载）
 """
+import contextlib
 import hashlib
 import json
 import pytest
@@ -66,30 +67,44 @@ class TestCleanMarkdown:
 
 
 class TestParseSingle:
+    """parse_single 走 MinerU Agent 轻量 API（免 token），mock 四步 HTTP 流程"""
+
+    @staticmethod
+    def _patch_agent_flow(markdown="# 测试内容\n\n这是解析后的Markdown"):
+        """构造四个 _agent_* 静态方法的 patch，模拟创建/上传/轮询/下载全流程"""
+        return [
+            patch.object(PDFParser, "_agent_create_task",
+                         staticmethod(lambda requests, cfg, pdf_path: ("task-1", "http://upload/url"))),
+            patch.object(PDFParser, "_agent_upload",
+                         staticmethod(lambda requests, cfg, file_url, pdf_path: None)),
+            patch.object(PDFParser, "_agent_poll",
+                         staticmethod(lambda requests, cfg, task_id: "http://cdn/result.md")),
+            patch.object(PDFParser, "_agent_download",
+                         staticmethod(lambda requests, cfg, markdown_url: markdown)),
+        ]
+
     def test_parse_single_success(self, parser):
         """测试单文件解析成功"""
-        with patch.object(
-            PDFParser, "_run_mineru",
-            _make_mock_run_mineru({"test": "# 测试内容\n\n这是解析后的Markdown"}),
-        ):
+        with contextlib.ExitStack() as stack:
+            for p in self._patch_agent_flow("# 测试内容\n\n这是解析后的Markdown"):
+                stack.enter_context(p)
             result = parser.parse_single(Path("test.pdf"))
         assert "测试内容" in result
 
     def test_parse_single_failure(self, parser):
         """测试解析失败抛出异常"""
-        def raise_error(self, output_dir, pdf_paths):
+        def raise_error(requests, cfg, pdf_path):
             raise RuntimeError("model error")
 
-        with patch.object(PDFParser, "_run_mineru", raise_error):
-            with pytest.raises(RuntimeError, match="PDF解析失败"):
+        with patch.object(PDFParser, "_agent_create_task", staticmethod(raise_error)):
+            with pytest.raises(ValueError, match="PDF解析失败"):
                 parser.parse_single(Path("test.pdf"))
 
     def test_parse_single_empty_result(self, parser):
         """测试解析结果为空抛出异常"""
-        with patch.object(
-            PDFParser, "_run_mineru",
-            _make_mock_run_mineru({"test": "   \n  "}),
-        ):
+        with contextlib.ExitStack() as stack:
+            for p in self._patch_agent_flow("   \n  "):
+                stack.enter_context(p)
             with pytest.raises(RuntimeError, match="PDF解析结果为空"):
                 parser.parse_single(Path("test.pdf"))
 

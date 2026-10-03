@@ -38,16 +38,16 @@ data: <单行 JSON>
 
 ### 1.2 认证约定
 
-- **受保护接口**:#2 `POST /api/chat`、#9 `GET /api/conversations`、#10 `GET /api/conversations/{id}/messages`、#17 `PATCH` 与 #18 `DELETE /api/auth/{user_id}`(仅限本人)。其余接口(health/resume/knowledge/#16 用户查询)开放。
+- **受保护接口**:#2 `POST /api/chat`、#3 `POST /api/resume/parse`、#4 `GET /api/resume/parse/{task_id}`、#5 `GET /api/resume/parse/{task_id}/stream`、#11 `GET /api/conversations`、#12 `GET /api/conversations/{id}/messages`、#19 `PATCH` 与 #20 `DELETE /api/auth/{user_id}`(仅限本人)。其余接口(health、#6 supported-extensions、knowledge、#18 用户查询)开放。
 - **请求头**:`Authorization: Bearer <access_token>`。SSE 受保护接口同样走此头(前端用 fetch 流式请求,不受 EventSource 无法带头的限制)。
-- **JWT**:HS256 签名;payload 含 `sub`(用户 id 字符串)、`exp`、`type`(`"access"` / `"refresh"`)。密钥取自环境变量 `SECRET_KEY`(经 .env / compose env_file 注入);TTL 由 `src/config.py` 的 `AuthConfig` 配置(代码中经 `settings.auth.*` 访问):`access_token_expire_minutes`(默认 1 分钟,便于演示过期自动刷新闭环)、`refresh_token_expire_minutes`(默认 7×24×60)。
+- **JWT**:HS256 签名;payload 含 `sub`(用户 id 字符串)、`exp`、`type`(`"access"` / `"refresh"`)。密钥取自环境变量 `SECRET_KEY`(经 .env / compose env_file 注入);TTL 由 `src/config.py` 的 `AuthConfig` 配置(代码中经 `settings.auth.*` 访问):`access_token_expire_minutes`(默认 60 分钟)、`refresh_token_expire_minutes`(默认 7×24×60)。
 - **401 矩阵**(受保护接口):
   | 情形 | 状态码 | detail |
   |---|---|---|
   | 缺失 Authorization 头 | 401 | `Not authenticated`(OAuth2PasswordBearer 内置文案) |
   | 解码失败/已过期/`type≠access`/`sub` 非整数 | 401 | `Invalid or expired token` |
   | token 指向的用户已不存在 | 401 | `User not found` |
-- **refresh token 载体**:不进 JSON 响应体,经 `Set-Cookie` 下发——名 `refresh-token`、`HttpOnly`(JS 不可读,收窄 XSS 面)、`SameSite=Strict`(防 CSRF)、`Path=/api/auth`(只随认证端点发送)、`Max-Age` = refresh_token_expire_minutes×60;`Secure` 开发(http)为 false、生产(https)为 true。dev(vite proxy)与 prod(静态托管)均同源部署,cookie 天然可用。
+- **refresh token 载体**:不进 JSON 响应体,经 `Set-Cookie` 下发——名 `refresh-token`、`HttpOnly`(JS 不可读,收窄 XSS 面)、`SameSite=Strict`(防 CSRF)、`Path=/api/auth`(只随认证端点发送)、`Max-Age` = refresh_token_expire_minutes×60;`Secure` 由 `settings.auth.cookie_secure` 配置驱动(开发 http 置 false、生产 https 置 true)。dev(vite proxy)与 prod(静态托管)均同源部署,cookie 天然可用。
 - **轮换与复用检测(jti + family)**:库 `refresh_tokens` 表不存 token 本体,只存其 payload 里的随机 `jti` 与所属 `family_id`(一次登录派生的所有 refresh 同属一个 family)。每次调 `/api/auth/refresh`:吊销旧 jti → 签发新对(新 refresh 沿用 family_id) → Set-Cookie 覆盖。**已吊销的 jti 被再次使用 = token 泄露信号 → 吊销整个 family**。前端收到 refresh 接口的 401 应直接登出(不做重试,防死循环)。
 - **归属判据**:目标会话不属于当前用户 → `404`(与"不存在"同判据,**不用 403**,避免泄露资源存在性)。
 
@@ -62,8 +62,20 @@ data: <单行 JSON>
 | `ChatRequest` | `prompt` | string | 用户输入,必填,非空 |
 | | `existing_resume` | string? | 已有简历 Markdown 文本,可选 |
 | | `conversation_id` | int? | 所属会话 id;为空则服务端新建会话并经 `conversation` 事件回传 |
-| `ParseResponse` | `filename` | string | 原始文件名 |
+| `ParseResponse` | `filename` | string | 原始文件名(**旧同步解析响应**;异步化后 `POST /api/resume/parse` 改返回 `ResumeParseAck`,解析结果经 `ResumeParseStatus.content` 下发) |
 | | `content` | string | 解析出的 Markdown 文本 |
+| `ResumeParseAck` | `task_id` | string | 简历解析任务 ID |
+| | `status` | TaskState | 初始为 `"pending"` |
+| `ResumeParseStatus` | `task_id` | string | 任务 ID |
+| | `status` | TaskState | 状态(**不含 `task` 字段**,与知识库 `TaskStatus` 区分) |
+| | `stage` | string? | 当前阶段标识(`queued` 排队 / `parsing` 解析中 等) |
+| | `percent` | number? | 进度百分比 0-100 |
+| | `message` | string? | 最新进度文本 |
+| | `filename` | string? | 原始上传文件名(前端回显) |
+| | `content` | string? | 解析出的 Markdown 文本(仅 `status=="success"` 时返回) |
+| | `error` | string? | 失败原因 |
+| | `created_at` | number | 创建时间(epoch 秒) |
+| | `finished_at` | number? | 结束时间(epoch 秒) |
 | `SupportedExtensions` | `extensions` | string[] | 如 `[".md",".txt",".docx",".pdf"]` |
 | `BuildRequest` | `task` | TaskKind | 构建任务类型,必填 |
 | | `force` | boolean? | 是否强制全量,默认 false |
@@ -111,12 +123,13 @@ data: <单行 JSON>
 
 refresh token 只经 httpOnly cookie 下发,不出现在任何 JSON 响应体中。
 
-`Token` **不含 `expires_in`**:前端采用 **401 驱动刷新**——受保护请求收到 401 时先调 `/api/auth/refresh`,成功则用新 access 重放原请求,失败则登出(开发期 access TTL 仅 1 分钟,此路径会被高频走到,天然完成验收)。
+`Token` **不含 `expires_in`**:前端采用 **401 驱动刷新**——受保护请求收到 401 时先调 `/api/auth/refresh`,成功则用新 access 重放原请求,失败则登出。前端另在请求/开流前用 `ensureFreshToken()` 解析 access 的 `exp`,临期(默认 30s 内)主动刷新,减少 401 往返。
 
 ### 2.2 枚举
 
-- `TaskKind`(构建任务类型,对应现有 CLI 命令):
+- `TaskKind`(知识库构建任务类型,对应现有 CLI 命令):
   `"build-all" | "parse-pdfs" | "extract-summaries" | "split-chunks" | "build-indexes" | "ingest-highlights"`
+  > 简历解析任务的内部 `task` 值为 `"parse-resume"`,**不属于 `TaskKind`**;它与知识库任务共用 `build_tasks` 表,但 `GET /api/knowledge/tasks` 与 `GET /api/knowledge/tasks/{task_id}` 必须过滤掉 `parse-resume` 行(否则 `TaskStatus.task: TaskKind` 序列化非法值会令整个列表接口 `500`)。简历解析任务状态一律经 `ResumeParseStatus`(不含 `task` 字段)返回。
 - `TaskState`(任务状态):
   `"pending" | "running" | "success" | "failed"`
 - `Intent`(意图,对齐 `run_stream` 的 intent 事件):
@@ -128,22 +141,24 @@ refresh token 只经 httpOnly cookie 下发,不出现在任何 JSON 响应体中
 |---|---|---|---|---|
 | 1 | GET | `/api/health` | JSON | 健康检查 |
 | 2 | POST | `/api/chat` | SSE | 流式对话(问答/简历生成/闲聊)🔒 |
-| 3 | POST | `/api/resume/parse` | JSON | 上传简历文件解析为 Markdown |
-| 4 | GET | `/api/resume/supported-extensions` | JSON | 支持的文件扩展名 |
-| 5 | POST | `/api/knowledge/build` | JSON | 触发知识库构建后台任务 |
-| 6 | GET | `/api/knowledge/tasks/{task_id}/stream` | SSE | 订阅任务进度 |
-| 7 | GET | `/api/knowledge/tasks/{task_id}` | JSON | 查询任务状态快照(轮询兜底) |
-| 8 | GET | `/api/knowledge/tasks` | JSON | 任务列表(分页,created_at 降序) |
-| 9 | GET | `/api/conversations` | JSON | 会话列表(分页,updated_at 降序)🔒 |
-| 10 | GET | `/api/conversations/{id}/messages` | JSON | 查询某会话的消息历史 🔒 |
-| 11 | POST | `/api/auth/register` | JSON | 注册新用户 |
-| 12 | POST | `/api/auth/login` | JSON | 登录,签发 token 对 |
-| 13 | POST | `/api/auth/refresh` | JSON | 用 cookie 中的 refresh token 轮换新 token 对 🍪 |
-| 14 | GET | `/api/auth/me` | JSON | 当前用户信息 🔒 |
-| 15 | POST | `/api/auth/logout` | JSON | 登出:吊销整个 token family(不清 cookie,见 §4.15)🍪 |
-| 16 | GET | `/api/auth/user/{user_id}` | JSON | 查询用户公开信息(UserPublic) |
-| 17 | PATCH | `/api/auth/{user_id}` | JSON | 修改本人 username/email 🔒 |
-| 18 | DELETE | `/api/auth/{user_id}` | JSON | 删除本人账号(级联删会话/消息/refresh_tokens)🔒 |
+| 3 | POST | `/api/resume/parse` | JSON(202) | 提交简历解析后台任务,返回 `task_id`(不再同步返回内容)🔒 |
+| 4 | GET | `/api/resume/parse/{task_id}` | JSON | 查询简历解析任务状态/结果(轮询兜底)🔒 |
+| 5 | GET | `/api/resume/parse/{task_id}/stream` | SSE | 订阅简历解析任务进度 🔒 |
+| 6 | GET | `/api/resume/supported-extensions` | JSON | 支持的文件扩展名 |
+| 7 | POST | `/api/knowledge/build` | JSON | 触发知识库构建后台任务 |
+| 8 | GET | `/api/knowledge/tasks/{task_id}/stream` | SSE | 订阅任务进度 |
+| 9 | GET | `/api/knowledge/tasks/{task_id}` | JSON | 查询任务状态快照(轮询兜底) |
+| 10 | GET | `/api/knowledge/tasks` | JSON | 知识库任务列表(分页,created_at 降序;不含 parse-resume) |
+| 11 | GET | `/api/conversations` | JSON | 会话列表(分页,updated_at 降序)🔒 |
+| 12 | GET | `/api/conversations/{id}/messages` | JSON | 查询某会话的消息历史 🔒 |
+| 13 | POST | `/api/auth/register` | JSON | 注册新用户 |
+| 14 | POST | `/api/auth/login` | JSON | 登录,签发 token 对 |
+| 15 | POST | `/api/auth/refresh` | JSON | 用 cookie 中的 refresh token 轮换新 token 对 🍪 |
+| 16 | GET | `/api/auth/me` | JSON | 当前用户信息 🔒 |
+| 17 | POST | `/api/auth/logout` | JSON | 登出:吊销整个 token family(不清 cookie,见 §4.17)🍪 |
+| 18 | GET | `/api/auth/user/{user_id}` | JSON | 查询用户公开信息(UserPublic) |
+| 19 | PATCH | `/api/auth/{user_id}` | JSON | 修改本人 username/email 🔒 |
+| 20 | DELETE | `/api/auth/{user_id}` | JSON | 删除本人账号(级联删会话/消息/refresh_tokens)🔒 |
 
 🔒 = 需 `Authorization: Bearer <access_token>`(见 §1.2);🍪 = 读/写 `refresh-token` httpOnly cookie。
 
@@ -189,25 +204,42 @@ event: error    data: {"message":"..."}
 
 ### 4.3 POST /api/resume/parse
 
-- 请求:`multipart/form-data`,字段 `file`(二进制)。
-- 响应 `200`:`ParseResponse` = `{"filename": "...", "content": "<markdown>"}`
+- 鉴权:需 Bearer access token(401 见 §1.2)。
+- **语义变更(破坏性)**:由「同步阻塞解析并返回 Markdown」改为「**提交后台解析任务并立即返回 `task_id`**」。前端拿到 `task_id` 后经 §4.5 SSE 订阅进度(或 §4.4 轮询兜底),任务成功后从 `ResumeParseStatus.content` 取解析结果。
+- 请求:`multipart/form-data`,字段 `file`(二进制)。服务端在请求内读出 `file` 字节后交给后台线程(请求结束 `UploadFile` 即关闭)。
+- 响应 `202`:`ResumeParseAck` = `{"task_id": "<uuid>", "status": "pending"}`。
+- 行为:任务以 `task="parse-resume"` 入 `build_tasks` 表并记 `user_id`(归属)、`filename`(回显);后台由**进程级信号量**限流(并发上限 `RESUME_PARSE_MAX_CONCURRENCY`,默认 1),超出的任务排队等待槽位。解析出的 Markdown 写入 `data/processed/resume_uploads/{uuid}.md`,DB 仅存 `result_path`。
 - 错误:
-  - 不支持的扩展名 → `400` `{"detail": "不支持的简历文件格式: ..."}`
-  - 解析结果为空/解析失败 → `400` `{"detail": "..."}`
-  - 未携带文件 → `422`
+  - 不支持的扩展名 → `400` `{"detail": "不支持的简历文件格式: ..."}`(提交前白名单快速校验,不浪费任务槽位)。
+  - 未携带文件 → `422`。
+  - 解析结果为空/解析失败 → 任务置 `failed`,错误经 §4.4/§4.5 的 `error` 字段返回(不再是提交时的 400)。
 
-### 4.4 GET /api/resume/supported-extensions
+### 4.4 GET /api/resume/parse/{task_id}
+
+- 鉴权:需 Bearer access token(401 见 §1.2)。轮询兜底通道(与 §4.5 SSE 二选一或并用)。
+- 响应 `200`:`ResumeParseStatus` 快照。`status=="success"` 时读 `result_path` 文件,把解析出的 Markdown 一并放入 `content` 返回(前端一次拿到)。
+- 归属校验:`task_id` 不存在**或不属于当前用户** → `404` `{"detail": "task not found"}`(同判据,不泄露存在性,延续 IDOR 防护)。
+- 内存任务表 miss 时回落查 `build_tasks` 表(服务重启后仍可查历史任务)。
+
+### 4.5 GET /api/resume/parse/{task_id}/stream(SSE)
+
+- 鉴权:需 Bearer access token;**401/404 校验必须在建立流(返回 `StreamingResponse`)之前完成**,返回真实状态码而非 error 帧。
+- 归属校验:`task_id` 不存在**或不属于当前用户** → `404`(开流前)。
+- 响应:`text/event-stream`,复用知识库任务 SSE 事件协议(见 §4.8):`progress`(`{stage,message,percent}`,如排队 `queued`/解析中 `parsing`)、`done`(`{task_id,status,elapsed}`)、`error`(`{message}`)。
+- 订阅时若任务已结束,补发当前最终状态后立即 `done`。
+
+### 4.6 GET /api/resume/supported-extensions
 
 - 响应 `200`:`{"extensions": [".md", ".txt", ".docx", ".pdf"]}`
 
-### 4.5 POST /api/knowledge/build
+### 4.7 POST /api/knowledge/build
 
 - 请求体:`BuildRequest`
 - 响应 `202`:`BuildAck` = `{"task_id": "<uuid>", "status": "pending"}`
 - 行为:创建任务并入内存任务表,启动后台线程执行 `knowledge_service`,立即返回。
 - 错误:非法 `task` → `422`。
 
-### 4.6 GET /api/knowledge/tasks/{task_id}/stream(SSE)
+### 4.8 GET /api/knowledge/tasks/{task_id}/stream(SSE)
 
 - 响应:`text/event-stream`,实时推送该任务进度。
 - 不存在的 `task_id` → `404`(在建立流之前返回)。
@@ -227,43 +259,44 @@ event: error    data: {"message":"..."}
 - `error`:`{message}` 执行异常(随后仍会有 done 或作为终止)。
 - 订阅时若任务已结束,补发当前最终状态后立即 `done`。
 
-### 4.7 GET /api/knowledge/tasks/{task_id}
+### 4.9 GET /api/knowledge/tasks/{task_id}
 
 - 响应 `200`:`TaskStatus` 快照。
 - 不存在 → `404` `{"detail": "task not found"}`
+- 命中 `task="parse-resume"` 的行同样按不存在处理(`404`);简历解析任务状态请走 §4.4。
 
-### 4.8 GET /api/knowledge/tasks
+### 4.10 GET /api/knowledge/tasks
 
 - 查询参数:`page`(默认 1,≥1)、`page_size`(默认 10,1~100)。
-- 响应 `200`:`TaskList`,直接查 `build_tasks` 表,按 `created_at` 降序分页。
+- 响应 `200`:`TaskList`,查 `build_tasks` 表,按 `created_at` 降序分页;**过滤掉 `task="parse-resume"` 行**(仅返回知识库构建任务,避免 `TaskKind` 序列化非法值导致 500)。
 
-### 4.9 GET /api/conversations
+### 4.11 GET /api/conversations
 
 - 鉴权:需 Bearer access token(401 见 §1.2)。
 - 查询参数:`page`(默认 1,≥1)、`page_size`(默认 20,1~100)。
 - 响应 `200`:`ConversationList`,**仅返回当前用户的会话**,按 `updated_at` 降序分页。
 
-### 4.10 GET /api/conversations/{id}/messages
+### 4.12 GET /api/conversations/{id}/messages
 
 - 鉴权:需 Bearer access token(401 见 §1.2)。
 - 响应 `200`:`ConversationMessages`,消息按 `created_at` 升序(时间正序)。
 - 会话不存在**或不属于当前用户** → `404` `{"detail": "conversation not found"}`(同判据,不泄露存在性)。
 
-### 4.11 POST /api/auth/register
+### 4.13 POST /api/auth/register
 
 - 请求体:`UserCreate`(username 1~50、email EmailStr、password ≥8,不满足 → `422`)。
 - 响应 `201`:`UserPrivate`(id/username/email)。
 - 错误:用户名已存在 → `409` `{"detail": "Username already exists"}`;邮箱已注册 → `409` `{"detail": "Email already registered"}`(均大小写不敏感查重)。
 - 行为:email 小写归一后入库;密码经 argon2id(pwdlib `PasswordHash.recommended()`)哈希后落 `users.password_hash` 列;**注册不自动登录**,前端注册成功后引导调 login。
 
-### 4.12 POST /api/auth/login
+### 4.14 POST /api/auth/login
 
 - 请求体:`UserLoginReq`(email + password)。
 - 响应 `200`:`Token`;同时 `Set-Cookie: refresh-token=<JWT>`(属性见 §1.2,`Path=/api/auth`)。
 - 行为:按 email 大小写不敏感查用户;生成新 `family_id`(登录 = 新 family 的起点),落首条 `refresh_tokens` 记录(jti/family_id/expire_at)。
 - 错误:邮箱或密码错误 → `401` `{"detail": "Incorrect email or password"}`(统一文案,不区分哪个字段错,避免账号枚举)。
 
-### 4.13 POST /api/auth/refresh
+### 4.15 POST /api/auth/refresh
 
 - 请求:无 body,从 cookie 读 `refresh-token`。
 - 响应 `200`:`Token`(新 access);同时 Set-Cookie 覆盖为新 refresh(沿用原 family_id)。
@@ -273,23 +306,23 @@ event: error    data: {"message":"..."}
   - 正常 → 吊销旧 jti、插入新 jti 记录(同 family)、签发新对。
 - 错误:cookie 缺失 → `401` `{"detail": "Refresh token is missing"}`;解码失败/类型不符/表中无该 jti → `401` `{"detail": "Invalid refresh token"}`;jti 已吊销仍被使用(复用检测) → `401` `{"detail": "Refresh token is revoked"}`。
 
-### 4.14 GET /api/auth/me
+### 4.16 GET /api/auth/me
 
 - 鉴权:需 Bearer access token(401 见 §1.2)。
 - 响应 `200`:`UserPrivate`。
 
-### 4.15 POST /api/auth/logout
+### 4.17 POST /api/auth/logout
 
 - 请求:无 body,从 cookie 读 `refresh-token`。
 - 行为与响应:无 cookie → `204`(幂等);cookie 有效 → 按 jti 找到 family,**吊销整个 family** → `204`;cookie 存在但解码失败 → `401` `{"detail": "Invalid refresh token"}`。
 - **不清 cookie**:服务端吊销已足够——cookie 里的 refresh token 成为死票,后续 `/api/auth/refresh` 一律 401,前端据此登出。
 
-### 4.16 GET /api/auth/user/{user_id}
+### 4.18 GET /api/auth/user/{user_id}
 
 - 公开接口(无鉴权)。响应 `200`:`UserPublic`(仅 id/username,不含 email)。
 - 错误:用户不存在 → `404` `{"detail": "User not found"}`。
 
-### 4.17 PATCH /api/auth/{user_id}
+### 4.19 PATCH /api/auth/{user_id}
 
 - 鉴权:需 Bearer access token,且 `user_id` 必须为本人。
 - 请求体:`UserUpdate`(username/email 均可省略,只改提供的字段)。
@@ -297,7 +330,7 @@ event: error    data: {"message":"..."}
 - 错误:非本人 → `403` `{"detail": "Not authorized to update this user"}`;用户不存在 → `404`;新用户名被占用 → `409` `{"detail": "Username already exists"}`;新邮箱被注册 → `409` `{"detail": "Email already registered"}`(与自身现值相同不算冲突)。
 - 行为:email 小写归一;username/email 查重均大小写不敏感。
 
-### 4.18 DELETE /api/auth/{user_id}
+### 4.20 DELETE /api/auth/{user_id}
 
 - 鉴权:需 Bearer access token,且 `user_id` 必须为本人。
 - 响应 `204`。错误:非本人 → `403` `{"detail": "Not authorized to delete this user"}`;用户不存在 → `404`。
@@ -343,9 +376,19 @@ export type TaskEvent =
   | { type: 'log'; line: string }
   | { type: 'done'; task_id: string; status: 'success' | 'failed'; elapsed: number }
   | { type: 'error'; message: string }
+
+// 简历解析任务(异步):复用 TaskState,不含 task 字段
+export interface ResumeParseAck { task_id: string; status: TaskState }
+export interface ResumeParseStatus {
+  task_id: string; status: TaskState;
+  stage?: string; percent?: number; message?: string;
+  filename?: string; content?: string; error?: string;
+  created_at: number; finished_at?: number;
+}
 ```
 
 ## 7. 兼容性说明
 
+- **`POST /api/resume/parse` 破坏性变更**:由同步返回解析内容改为异步任务(`202` + `task_id`);前端上传流程随之改为「提交 → SSE/轮询进度 → 成功后取 `content`」,旧同步行为不再保留。
 - 现有 `app_streamlit.py` 与 `main.py` CLI 保留;`main.py` 的 `cmd_*` 委托 `knowledge_service`,CLI 行为不变(有回归测试)。
 - 对话 SSE 事件与 `run_stream()` 现有事件字典一一对应,后端仅做"字典 → SSE 帧"的封装,不改动 Agent 逻辑。

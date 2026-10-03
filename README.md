@@ -15,6 +15,7 @@
 - **简历生成**：综合课程知识分块 + 项目介绍成品（无介绍文档时降级用亮点分块），自动生成/优化简历
 - **基于已有简历生成**：Web 侧边栏上传已有简历（Word/PDF/md/txt，按类型分流解析），生成时沿用其章节结构与字段顺序，保留其中真实事实（个人信息/教育/工作经历）并用知识库素材增强措辞
 - **双模式路由**：Agent 自动判断意图，选择快速回答或深度思考路径
+- **多用户鉴权**：email 注册登录，JWT access + refresh cookie 双令牌（jti 轮换/令牌族连坐吊销），对话与消息按用户隔离
 
 ---
 
@@ -47,7 +48,7 @@ ResumeAgent/
 │   └── api/                 # FastAPI 后端（app/routers/services/task_manager/sse）
 │
 ├── frontend/                # Vue3 + Vite + TS 前端（Pinia/Element Plus/Vitest）
-├── tests/                   # 后端测试：329 passed（含 tests/test_api/）
+├── tests/                   # 后端测试：364 passed（含 test_api/ 与 test_auth/）
 └── docs/                    # 设计文档、报告与 specs/api-contract.md（前后端契约）
 ```
 
@@ -213,7 +214,7 @@ streamlit run app_streamlit.py
 
 浏览器会自动打开 `http://localhost:8501`，在聊天框中直接输入即可。
 
-**基于已有简历生成**（可选）：在侧边栏“📎 我的已有简历”上传 `.docx/.pdf/.md/.txt` 文件（Word 用 python-docx 提取段落表格，手工排版的加粗章节行也会识别为标题；PDF 复用 MinerU 解析），上传后解析一次并缓存，可预览/移除；之后说“生成简历”时，Agent 会以它为事实骨架，**沿用它的章节结构与章节内字段格式输出**（如“时间/公司/职位/工作内容”“技术栈/项目描述/责任描述”，不套用默认模板），保留个人信息、教育背景、工作经历等真实内容，再用知识库素材增强项目经历与技能措辞。
+**基于已有简历生成**（可选）：在侧边栏“📎 我的已有简历”上传 `.docx/.pdf/.md/.txt` 文件（Word 用 python-docx 提取段落表格，手工排版的加粗章节行也会识别为标题；PDF 调用 MinerU 官方 Agent 轻量 API 远程解析，免 token、云端无需本地部署），上传后解析一次并缓存，可预览/移除；之后说“生成简历”时，Agent 会以它为事实骨架，**沿用它的章节结构与章节内字段格式输出**（如“时间/公司/职位/工作内容”“技术栈/项目描述/责任描述”，不套用默认模板），保留个人信息、教育背景、工作经历等真实内容，再用知识库素材增强项目经历与技能措辞。
 
 回答采用**流式输出**（SSE效果）：先显示阶段进度（意图识别 → 知识库检索 → 生成回答），然后逐字展示答案，无需等待全部生成完毕。
 
@@ -271,7 +272,7 @@ Bye!
 
 ## 前后端分离 Web 应用（FastAPI + Vue3）
 
-除 Streamlit 与 CLI 外，项目提供**前后端分离**的现代 Web 应用：后端用 FastAPI 封装 Agent 流式能力与知识库构建任务，前端用 Vue3 全新实现。单用户本地/演示、无鉴权、全局单 Agent 实例。接口契约见 [docs/specs/api-contract.md](docs/specs/api-contract.md)（SDD 唯一真理来源）。
+除 Streamlit 与 CLI 外，项目提供**前后端分离**的现代 Web 应用：后端用 FastAPI 封装 Agent 流式能力与知识库构建任务，前端用 Vue3 全新实现。**多用户 JWT 鉴权**：email 注册登录、access token（Bearer）+ refresh token（httpOnly cookie）双令牌、对话/消息按用户隔离。接口契约见 [docs/specs/api-contract.md](docs/specs/api-contract.md)（SDD 唯一真理来源），鉴权体系的设计与交付细节见 [docs/用户系统交付说明.md](docs/用户系统交付说明.md)。
 
 ### 架构
 
@@ -279,6 +280,7 @@ Bye!
   - `POST /api/chat`（SSE）：封装 `ResumeAgent.run_stream()`，逐帧下发 `status/intent/token/done/error`。
   - `POST /api/resume/parse`、`GET /api/resume/supported-extensions`：简历文件上传解析。
   - `POST /api/knowledge/build` + `GET /api/knowledge/tasks/{id}/stream`（SSE）：后台线程执行知识库构建，实时推送进度。
+  - `/api/auth/*`：注册/登录/刷新/登出/用户查询改删（JWT + refresh cookie 轮换，见交付说明）。
   - `GET /api/health`：健康检查。
 - **前端**（`frontend/`）：Vue3 + Vite + TypeScript + Pinia + Vue Router + Element Plus；用 `fetch + ReadableStream` 消费 SSE，`markdown-it + highlight.js + DOMPurify` 安全渲染。
 
@@ -405,7 +407,7 @@ Agent 通过 **意图识别** 自动选择处理路径：
 
 ## 运行测试
 
-**后端（pytest，329 passed）：**
+**后端（pytest，364 passed）：**
 
 ```bash
 # 运行全部后端测试
@@ -414,9 +416,10 @@ pytest tests/ -v
 # 按模块运行
 pytest tests/test_agent/ -v
 pytest tests/test_api/ -v          # FastAPI 路由/服务/SSE/任务管理
+pytest tests/test_auth/ -v         # 认证：security 纯函数 + auth 路由全链路
 ```
 
-**前端（Vitest，83 passed）：**
+**前端（Vitest，125 passed）：**
 
 ```bash
 cd frontend
@@ -430,9 +433,9 @@ npm run build                      # 附带 vue-tsc --noEmit 类型检查
 
 **Q: PDF 解析失败怎么办？**
 
-项目使用 MinerU 解析 PDF（GPU 加速）。如果某些 PDF 格式特殊导致解析失败，可以尝试：
-- 确认 PDF 文件不是扫描件（扫描件需启用 OCR）
-- 检查 PDF 是否加密
+分两种场景：
+- **上传的简历 PDF**：调用 MinerU 官方 Agent 轻量 API（免 token、远程解析，云端/本地无需部署 MinerU）。失败时先排查：文件是否 ≤10MB 且 ≤20 页（超限制请拆分/压缩）、服务器能否访问 `mineru.net`、是否触发 IP 限频（HTTP 429，稍后重试）；扫描件可置 `MINERU_IS_OCR=true` 启用 OCR。
+- **知识库课程 PDF 批量构建**（`python main.py build-all`）：仍走本地 MinerU（GPU 加速），需本地安装 `mineru[core]` + CUDA 版 PyTorch；此环节仅在本地构建知识库时用，云端不构建。
 
 **Q: 项目经历素材不准确？**
 
@@ -458,20 +461,22 @@ npm run build                      # 附带 vue-tsc --noEmit 类型检查
 - **LLM 工具链**：LangChain
 - **向量数据库**：FAISS
 - **全文检索**：BM25 (rank-bm25)
-- **PDF 解析**：MinerU
+- **PDF 解析**：MinerU（知识库课程 PDF 本地 GPU 解析）+ MinerU 官方 Agent 轻量 API（简历 PDF 远程解析，免 token）
 - **Word 解析**：python-docx（上传已有简历的 docx 解析）
 - **Token 计数**：tiktoken
 - **数据模型**：Pydantic v2
 - **Web UI**：Streamlit（保留）+ 前后端分离 Web 应用（FastAPI + Vue3）
 - **后端 API**：FastAPI + Uvicorn（SSE 流式、后台线程任务）
+- **认证**：pwdlib（argon2id 密码哈希）+ PyJWT（HS256）+ SQLAlchemy AsyncSession（users / refresh_tokens）
 - **前端**：Vue3 + Vite + TypeScript + Pinia + Vue Router + Element Plus
 - **Markdown 渲染**：markdown-it + highlight.js + DOMPurify
-- **测试**：pytest（后端 329）+ Vitest / @vue/test-utils（前端 83）
+- **测试**：pytest（后端 364）+ Vitest / @vue/test-utils（前端 125）
 
 ---
 
 ## 相关文档
 
+- [用户系统交付说明](docs/用户系统交付说明.md) - 多用户 JWT 鉴权体系：设计决策、端点契约、前后端实现与测试
 - [云端部署方案](docs/部署方案.md) - 单容器同域部署（Docker + Nginx + HTTPS）与备选方案
 - [项目设计计划](docs/项目计划.md) - SDD + TDD 完整实施计划
 - [完成报告](docs/完成报告.md) - 项目完成情况总结

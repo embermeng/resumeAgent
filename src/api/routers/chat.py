@@ -16,6 +16,7 @@ from src.api.schemas_api import ChatRequest
 from src.api.services.agent_service import AgentService
 from src.api.sse import SSE_HEADERS, SSE_MEDIA_TYPE, sse_format
 
+from src.auth.security import CurrentUser
 from src.database.utils.dialog import create_conversation, add_message, check_conversation
 _log = logging.getLogger(__name__)
 
@@ -30,14 +31,18 @@ def event_to_sse(event: Dict[str, Any]) -> str:
 
 
 @router.post("/chat")
-def chat(req: ChatRequest, svc: AgentService = Depends(get_agent_service)):
+def chat(
+    req: ChatRequest,
+    current_user: CurrentUser,
+    svc: AgentService = Depends(get_agent_service),
+):
     if req.conversation_id is not None:
-        if not check_conversation(req.conversation_id):
+        if not check_conversation(req.conversation_id, current_user.id):
             raise HTTPException(status_code=404, detail="conversation not found")
         else:
             conv_id = req.conversation_id
     else:
-        conv_id = create_conversation(req.prompt)
+        conv_id = create_conversation(req.prompt, current_user.id)
 
     if conv_id is not None:
         add_message(conv_id, "user", req.prompt)

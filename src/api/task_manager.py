@@ -40,6 +40,8 @@ class TaskRecord:
 
     task_id: str
     task: str
+    user_id: Optional[int] = None
+    filename: Optional[str] = None
     status: str = "pending"
     stage: Optional[str] = None
     percent: Optional[float] = None
@@ -47,6 +49,7 @@ class TaskRecord:
     created_at: float = field(default_factory=time.time)
     finished_at: Optional[float] = None
     error: Optional[str] = None
+    result_path: Optional[str] = None
     events: List[Dict[str, Any]] = field(default_factory=list)
     cond: threading.Condition = field(default_factory=threading.Condition)
 
@@ -64,10 +67,13 @@ class TaskManager:
         self._tasks: Dict[str, TaskRecord] = {}
         self._lock = threading.Lock()
 
-    def submit(self, task: str, run_fn: RunFn) -> str:
+    def submit(self, task: str, run_fn: RunFn,
+        user_id: int | None = None,
+        filename: str | None = None
+    ) -> str:
         """创建任务并启动后台线程执行,立即返回 task_id"""
         task_id = uuid.uuid4().hex[:16]
-        record = TaskRecord(task_id=task_id, task=task)
+        record = TaskRecord(task_id=task_id, task=task, user_id=user_id, filename=filename)
         with self._lock:
             self._tasks[task_id] = record
         
@@ -101,7 +107,9 @@ class TaskManager:
 
         t0 = time.time()
         try:
-            run_fn(progress)
+            res = run_fn(progress)
+            if isinstance(res, str):
+                record.result_path = res
             record.status = "success"
             record.percent = 100
             record.finished_at = time.time()
@@ -150,11 +158,13 @@ class TaskManager:
         try:
             new_record = models.BuildTask(
                 task_id=record.task_id,
+                user_id=record.user_id,
                 task=record.task,
                 status=record.status,
                 stage=record.stage,
                 percent=record.percent,
                 message=record.message,
+                filename=record.filename,
                 error=record.error,
             )
             with SessionLocal() as db:
@@ -173,6 +183,7 @@ class TaskManager:
                     "message": record.message,
                     "error": record.error,
                     "finished_at": datetime.fromtimestamp(record.finished_at, tz=UTC) if record.finished_at else None,
+                    "result_path": record.result_path
                 }))
                 db.commit()
         except Exception:

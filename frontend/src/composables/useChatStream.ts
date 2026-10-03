@@ -1,5 +1,7 @@
 import { ref } from 'vue'
 import { streamSSE, createEventDispatcher } from './sse'
+import { ensureFreshToken } from '@/api/auth'
+import { getAccessToken } from '@/api/authToken'
 import type { ChatEvent, ChatRequest } from '@/types/events'
 
 export interface UseChatStreamOptions {
@@ -27,6 +29,9 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
     streaming.value = true
     error.value = null
     controller = new AbortController()
+    // /api/chat 受保护:开流前先确保 access token 未临近过期(SSE 中途 401 无法优雅重试)
+    await ensureFreshToken()
+    const token = getAccessToken()
     const dispatch = createEventDispatcher<ChatEvent>(
       (msg) => (error.value = msg),
       (evt) => options.onEvent?.(evt),
@@ -37,7 +42,12 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
         signal: controller.signal,
         init: {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+          credentials: 'include',
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'text/event-stream',
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
           body: JSON.stringify(req),
         },
         onFrame: dispatch,

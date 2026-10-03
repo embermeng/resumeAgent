@@ -69,10 +69,13 @@ async def task_status(
 ):
     """任务状态快照(轮询兜底)。异步路由+AsyncSession:内存 miss 时回落数据库。"""
     rec = tm.get(task_id)
+    if rec is not None and rec.task == "parse-resume":
+        raise HTTPException(status_code=404, detail="task not found")
     if rec is None:
         # 查数据库
         result = await db.execute(
-            select(models.BuildTask).where(models.BuildTask.task_id == task_id)
+            select(models.BuildTask)
+            .where(models.BuildTask.task_id == task_id, models.BuildTask.task != "parse-resume")
         )
         rec = result.scalars().first()
         if rec is None:
@@ -98,9 +101,14 @@ async def task_list(
     page_size: Annotated[int, Query(description="每页大小", ge=1, le=100)] = 10,
 ):
     """任务列表分页(降序)。异步路由+AsyncSession。"""
-    total = (await db.execute(select(func.count()).select_from(models.BuildTask))).scalar() or 0
+    total = (await db.execute(
+        select(func.count())
+        .select_from(models.BuildTask)
+        .where(models.BuildTask.task != "parse-resume"))
+    ).scalar() or 0
     result = await db.execute(
         select(models.BuildTask)
+        .where(models.BuildTask.task != "parse-resume")
         .order_by(models.BuildTask.created_at.desc())
         .offset((page - 1) * page_size)
         .limit(page_size),

@@ -4,20 +4,43 @@ import type {
   ConversationList,
   ConversationMessages,
   Health,
-  ParseResponse,
+  ResumeParseAck,
+  ResumeParseStatus,
   SupportedExtensions,
   TaskList,
   TaskStatus,
 } from '@/types/events'
+import { getAccessToken, notifySessionLost } from './authToken'
+import { refreshAccessToken } from './auth'
 
 /**
  * REST 客户端(契约 3/4,非 SSE 接口)。
  * SSE 接口(/chat、/tasks/{id}/stream)由 composables 用 fetch 流式消费,不走此处。
+ *
+ * 鉴权:每个受保护请求自动带 `Authorization: Bearer <access>`(token 见 authToken 模块),
+ * 并 credentials:'include' 以携带 httpOnly refresh cookie。收到 401 时单飞刷新一次并重放原请求;
+ * 刷新仍失败 → 触发会话失效回调(跳登录)并抛错。
  */
 const BASE = '/api'
 
-async function request<T>(url: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(url, init)
+function authHeaders(extra?: HeadersInit): HeadersInit | undefined {
+  const tok = getAccessToken()
+  if (!tok) return extra
+  return { ...(extra as Record<string, string>), Authorization: `Bearer ${tok}` }
+}
+
+async function request<T>(url: string, init?: RequestInit, isRetry = false): Promise<T> {
+  const res = await fetch(url, {
+    ...init,
+    credentials: 'include',
+    headers: authHeaders(init?.headers),
+  })
+  if (res.status === 401 && !isRetry) {
+    // access token 过期/失效 → 尝试用 refresh cookie 换新的,成功则重放一次
+    const tok = await refreshAccessToken()
+    if (tok) return request<T>(url, init, true)
+    notifySessionLost()
+  }
   if (!res.ok) {
     // 尽量还原 FastAPI 错误体 {"detail": "..."}
     let detail = `HTTP ${res.status}`
@@ -43,11 +66,23 @@ export function getSupportedExtensions(): Promise<SupportedExtensions> {
   return request<SupportedExtensions>(`${BASE}/resume/supported-extensions`)
 }
 
-/** POST /api/resume/parse(multipart 上传,Content-Type 由浏览器带 boundary) */
-export function parseResume(file: File): Promise<ParseResponse> {
+/**
+ * POST /api/resume/parse(契约 4.3):multipart 上传,提交后台解析任务。
+ * 异步化后返回 202 + `ResumeParseAck`(task_id),不再同步返回解析内容;
+ * 前端拿 task_id 后订阅 SSE 进度(契约 4.5)或轮询 getResumeParseStatus(契约 4.4)。
+ */
+export function parseResume(file: File): Promise<ResumeParseAck> {
   const form = new FormData()
   form.append('file', file)
-  return request<ParseResponse>(`${BASE}/resume/parse`, { method: 'POST', body: form })
+  return request<ResumeParseAck>(`${BASE}/resume/parse`, { method: 'POST', body: form })
+}
+
+/**
+ * GET /api/resume/parse/{task_id}(契约 4.4):轮询兜底,查解析任务状态/结果。
+ * 走带 401 自动刷新的 request;status==='success' 时响应带 content(解析出的 Markdown)。
+ */
+export function getResumeParseStatus(taskId: string): Promise<ResumeParseStatus> {
+  return request<ResumeParseStatus>(`${BASE}/resume/parse/${encodeURIComponent(taskId)}`)
 }
 
 /** POST /api/knowledge/build */
