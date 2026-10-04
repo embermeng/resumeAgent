@@ -15,6 +15,8 @@ services:
       # 跨域来源：同域部署可保持 *；前后端分开部署时填前端域名
       CORS_ORIGINS: "*"
       TZ: Asia/Shanghai
+      # 容器内用服务名 redis 访问（environment 优先级高于 env_file 的 .env）
+      REDIS_URL: redis://redis:6379/0
     ports:
       # 只暴露本机端口，由 Nginx 对外提供 HTTPS
       - "127.0.0.1:8000:8000"
@@ -24,7 +26,22 @@ services:
       timeout: 5s
       retries: 3
       start_period: 40s
+    depends_on:
+      redis:
+        condition: service_healthy
 
     # 可选：需要在云端更新知识库时再启用挂载（首次需把索引复制到 ./runtime-data）
     # volumes:
     #   - ./runtime-data:/app/data
+
+  redis:
+    image: redis:7-alpine
+    container_name: resume-agent-redis
+    restart: unless-stopped
+    # 检索结果缓存可丢、可随时重建，故不挂数据卷；
+    # 不对外暴露 ports，仅 compose 内部网络可达（resume-agent 通过服务名 redis 访问）
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5

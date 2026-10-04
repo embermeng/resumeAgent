@@ -26,11 +26,21 @@ services:
     volumes:
       - pgdata_dev:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U resume -d resumeagent"]
+      test: [ "CMD-SHELL", "pg_isready -U resume -d resumeagent" ]
       interval: 5s
       timeout: 3s
       retries: 10
-
+  redis:
+    image: redis:7-alpine
+    container_name: resume-agent-redis-dev
+    ports:
+      # 避让宿主可能已占的 6379（同 db 用 5433 避让 5432 的思路）
+      - "127.0.0.1:6380:6379"
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 5s
+      timeout: 3s
+      retries: 10
   app:
     build:
       context: .
@@ -45,6 +55,7 @@ services:
       SERVE_STATIC: "0"
       CORS_ORIGINS: "*"
       TZ: Asia/Shanghai
+      REDIS_URL: redis://redis:6379/0
     volumes:
       # 挂载整个项目根,pyprojroot here() 才能定位到根;改源码 --reload 即时生效
       - .:/app
@@ -52,6 +63,8 @@ services:
       - "127.0.0.1:8000:8000"
     depends_on:
       db:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     command: uvicorn app_api:app --host 0.0.0.0 --port 8000 --reload
 

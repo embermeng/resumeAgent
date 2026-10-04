@@ -65,3 +65,4 @@ pwdlib[argon2]
 pydantic-settings
 pyjwt
 email-validator
+redis[hiredis]>=5.0.0

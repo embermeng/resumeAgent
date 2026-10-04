@@ -10,14 +10,17 @@ import shutil
 import tempfile
 from pathlib import Path
 from typing import List, Dict, Optional
+import random
 
 import numpy as np
 import faiss
 
 from src.config import get_config
 from src.knowledge.tokenizer import tokenize
+from src.cache.retrieval_cache import build_key, cache_get, cache_set
 
 _log = logging.getLogger(__name__)
+settings = get_config()
 
 
 def read_faiss_index(faiss_path: Path):
@@ -248,7 +251,8 @@ class VectorRetriever:
             if actual_top_n == 0:
                 continue
 
-            distances, indices = vector_db.search(x=embedding_array, k=actual_top_n)
+            distances, indices = vector_db.search(
+                x=embedding_array, k=actual_top_n)
 
             for distance, index in zip(distances[0], indices[0]):
                 all_results.append({
@@ -280,7 +284,7 @@ class HybridRetriever:
         )
         self.bm25_retriever = BM25Retriever(bm25_db_dir, documents_dir)
 
-    def retrieve(
+    def _retrieve_uncached(
         self,
         query: str,
         category: str = None,
@@ -293,8 +297,10 @@ class HybridRetriever:
         参数:
             doc_ids: 限定只检索这些文档（分层检索定向召回用）
         """
-        vector_results = self.vector_retriever.retrieve(query, category, top_n=top_n * 2, doc_ids=doc_ids)
-        bm25_results = self.bm25_retriever.retrieve(query, category=category, top_n=top_n * 2, doc_ids=doc_ids)
+        vector_results = self.vector_retriever.retrieve(
+            query, category, top_n=top_n * 2, doc_ids=doc_ids)
+        bm25_results = self.bm25_retriever.retrieve(
+            query, category=category, top_n=top_n * 2, doc_ids=doc_ids)
 
         # 合并结果（简单加权）
         merged = {}
@@ -322,5 +328,34 @@ class HybridRetriever:
                     "score": bm25_weight * r["score"],
                 }
 
-        results = sorted(merged.values(), key=lambda x: x["score"], reverse=True)
+        results = sorted(
+            merged.values(), key=lambda x: x["score"], reverse=True)
         return results[:top_n]
+
+    def retrieve(
+        self,
+        query: str,
+        category: str = None,
+        top_n: int = 5,
+        vector_weight: float = 0.6,
+        doc_ids: List[str] = None,
+    ) -> List[Dict]:
+        if not settings.redis.cache_enabled:
+            return self._retrieve_uncached(query, category, top_n, vector_weight, doc_ids)
+
+        key = build_key(query, category, top_n, vector_weight, doc_ids)
+        hit = cache_get(key)
+        if hit is not None:
+            # 命中-> json.loads 返回
+            return hit
+
+        # 没命中-> 检索-> json.dumps-> cache.set-> 返回
+        results = self._retrieve_uncached(
+            query, category, top_n, vector_weight, doc_ids)
+        if not results:
+            # 空结果也缓存，防止穿透
+            cache_set(key, results, settings.redis.empty_ttl)
+        else:
+            cache_set(key, results, settings.redis.cache_ttl +
+                      random.randint(0, settings.redis.cache_ttl_jitter))
+        return results

@@ -247,6 +247,8 @@ class TestVectorRetriever:
 
 
 class TestHybridRetriever:
+    # 缓存隔离由 tests/conftest.py 的全局 autouse fixture 统一负责
+
     @patch("src.retrieval.retriever.VectorRetriever._get_embedding")
     def test_hybrid_retrieve(self, mock_embed, setup_bm25_env, setup_vector_env):
         docs_dir, bm25_dir = setup_bm25_env
@@ -273,3 +275,84 @@ class TestHybridRetriever:
         assert len(results) > 0
         for r in results:
             assert r["doc_id"] == "doc2"
+
+
+class TestHybridCacheAside:
+    """HybridRetriever.retrieve 的 cache-aside 行为(mock redis 与底层检索)"""
+
+    @pytest.fixture(autouse=True)
+    def _enable_cache(self, monkeypatch):
+        """同上:patch retriever 实际读取的 settings 对象,保证开关生效"""
+        monkeypatch.setattr(
+            "src.retrieval.retriever.settings.redis.cache_enabled", True)
+
+    @pytest.fixture
+    def retriever(self, tmp_path):
+        """空索引目录即可:底层检索被 mock,不依赖真实 faiss/bm25"""
+        docs = tmp_path / "docs"; docs.mkdir()
+        bm25 = tmp_path / "bm25"; bm25.mkdir()
+        vec = tmp_path / "vec"; vec.mkdir()
+        return HybridRetriever(vec, bm25, docs)
+
+    def test_hit_skips_underlying_retrieve(self, retriever):
+        """命中缓存应直接返回,不打底层检索、不回写"""
+        cached = [{"text": "cached", "score": 1.0, "source": "s", "doc_id": "d", "chunk_id": 0}]
+        with patch("src.retrieval.retriever.cache_get", return_value=cached), \
+             patch.object(HybridRetriever, "_retrieve_uncached") as mu, \
+             patch("src.retrieval.retriever.cache_set") as ms:
+            out = retriever.retrieve("q")
+        assert out == cached
+        mu.assert_not_called()
+        ms.assert_not_called()
+
+    def test_miss_backfills_with_long_ttl(self, retriever):
+        """未命中应检索并回写,非空结果用 cache_ttl+jitter"""
+        from src.config import get_config
+        results = [{"text": "fresh", "score": 1.0, "source": "s", "doc_id": "d", "chunk_id": 0}]
+        with patch("src.retrieval.retriever.cache_get", return_value=None), \
+             patch.object(HybridRetriever, "_retrieve_uncached", return_value=results) as mu, \
+             patch("src.retrieval.retriever.cache_set") as ms, \
+             patch("src.retrieval.retriever.random.randint", return_value=0):
+            out = retriever.retrieve("q")
+        assert out == results
+        mu.assert_called_once()
+        ms.assert_called_once()
+        assert ms.call_args[0][2] == get_config().redis.cache_ttl
+
+    def test_empty_result_uses_short_ttl(self, retriever):
+        """防穿透回归:空结果必须用 empty_ttl,不能被长 TTL 覆盖"""
+        from src.config import get_config
+        with patch("src.retrieval.retriever.cache_get", return_value=None), \
+             patch.object(HybridRetriever, "_retrieve_uncached", return_value=[]), \
+             patch("src.retrieval.retriever.cache_set") as ms:
+            out = retriever.retrieve("q")
+        assert out == []
+        ms.assert_called_once()
+        assert ms.call_args[0][2] == get_config().redis.empty_ttl
+
+    def test_redis_down_degrades_to_uncached(self, retriever):
+        """Redis 整体不可用时检索应静默降级正常返回,不中断"""
+        results = [{"text": "x", "score": 1.0, "source": "s", "doc_id": "d", "chunk_id": 0}]
+        with patch("src.cache.retrieval_cache.get_sync_client", side_effect=Exception("down")), \
+             patch.object(HybridRetriever, "_retrieve_uncached", return_value=results):
+            out = retriever.retrieve("q")
+        assert out == results
+
+    @patch("src.retrieval.retriever.VectorRetriever._get_embedding")
+    def test_real_pipeline_results_write_back(self, mock_embed, setup_bm25_env, setup_vector_env):
+        """回归:真检索管线产物(含 numpy score)必须能序列化回写,
+        防 json.dumps TypeError 被降级吞掉导致缓存静默失效"""
+        docs_dir, bm25_dir = setup_bm25_env
+        _, vec_dir = setup_vector_env
+        mock_embed.return_value = [0.1] * 8
+        retriever = HybridRetriever(vec_dir, bm25_dir, docs_dir)
+
+        client = MagicMock()
+        client.get.return_value = None  # 强制 miss,走回写路径
+        with patch("src.cache.retrieval_cache.get_sync_client", return_value=client):
+            results = retriever.retrieve("RAG 检索", top_n=3)
+        assert len(results) > 0
+        client.set.assert_called_once()
+        # 写入值必须是可反解的 JSON 字符串
+        stored = json.loads(client.set.call_args[0][1])
+        assert isinstance(stored, list) and len(stored) == len(results)

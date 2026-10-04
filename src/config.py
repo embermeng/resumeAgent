@@ -184,6 +184,16 @@ class MinerUConfig:
 
 
 @dataclass
+class RedisConfig:
+    url: str = os.getenv("REDIS_URL", "redis://localhost:6380/0")
+    cache_enabled: bool = os.getenv("REDIS_CACHE_ENABLED", "true").lower() == "true"
+    cache_ttl: int = int(os.getenv("REDIS_CACHE_TTL", "3600"))          # 基础 TTL 秒
+    cache_ttl_jitter: int = int(os.getenv("REDIS_CACHE_TTL_JITTER", "300"))  # 雪崩抖动上限
+    empty_ttl: int = int(os.getenv("REDIS_CACHE_EMPTY_TTL", "60"))      # 空结果短 TTL(防穿透)
+    key_prefix: str = os.getenv("REDIS_CACHE_PREFIX", "resumeagent:retrieval:v1:")
+
+
+@dataclass
 class AppConfig:
     """应用总配置，聚合所有子配置"""
     paths: PathConfig = field(default_factory=PathConfig)
@@ -195,6 +205,7 @@ class AppConfig:
     auth: AuthConfig = field(default_factory=AuthConfig)
     semaphore: SemaphoreConfig = field(default_factory=SemaphoreConfig)
     mineru: MinerUConfig = field(default_factory=MinerUConfig)
+    redis: RedisConfig = field(default_factory=RedisConfig)
 
     def __post_init__(self):
         self.paths.ensure_dirs()
