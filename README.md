@@ -45,7 +45,7 @@ ResumeAgent/
 │   ├── agent/               # LangGraph Agent 模块
 │   ├── prompts/             # 提示词模板
 │   ├── schemas/             # 数据模型
-│   └── api/                 # FastAPI 后端（app/routers/services/task_manager/sse）
+│   └── api/                 # FastAPI 后端（app/routers/services/task_stream/sse）
 │
 ├── frontend/                # Vue3 + Vite + TS 前端（Pinia/Element Plus/Vitest）
 ├── tests/                   # 后端测试：364 passed（含 test_api/ 与 test_auth/）

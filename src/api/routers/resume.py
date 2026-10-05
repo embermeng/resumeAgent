@@ -1,12 +1,12 @@
 """
 简历文件接口:
-  POST /api/resume/parse                上传文件解析为 Markdown
-  GET  /api/resume/supported-extensions 支持的扩展名
-契约见 docs/specs/api-contract.md 第 4.3/4.4 节。
+  POST /api/resume/parse                     上传文件提交解析任务(Celery)
+  GET  /api/resume/parse/{task_id}           轮询任务状态/结果(DB 权威源)
+  GET  /api/resume/parse/{task_id}/stream    SSE 进度流(DB 快照+轮询转发)
+  GET  /api/resume/supported-extensions      支持的扩展名
+契约见 docs/specs/api-contract.md 第 4.3/4.4/4.5 节。
 """
 import logging
-import threading
-from functools import lru_cache
 from pathlib import Path
 from typing import Annotated
 from uuid import uuid4
@@ -14,28 +14,25 @@ from uuid import uuid4
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
+from sqlalchemy.orm import Session
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.api.deps import get_resume_parser, get_task_manager
 from src.api.schemas_api import ResumeParseAck, ResumeParseStatus, SupportedExtensions
-from src.api.sse import SSE_HEADERS, SSE_MEDIA_TYPE, sse_format
-from src.api.task_manager import TaskManager
+from src.api.sse import SSE_HEADERS, SSE_MEDIA_TYPE
 from src.auth.security import CurrentUser
 from src.config import get_config
-from src.database.database import get_async_session
+from src.database.database import get_async_session, get_session
 import src.database.models as models
-from src.knowledge.resume_file_parser import SUPPORTED_EXTENSIONS, ResumeFileParser
+from src.knowledge.resume_file_parser import SUPPORTED_EXTENSIONS
 from src.utils.time_convert import to_epoch
+from src.worker.task_store import insert_task
+from src.worker.tasks import parse_resume_task
+from src.api.task_stream import stream_task_events
 
 _log = logging.getLogger(__name__)
 
 router = APIRouter()
 settings = get_config()
-
-
-@lru_cache
-def _parse_semaphore():
-    return threading.Semaphore(settings.semaphore.resume_parse_max_concurrency)
 
 
 @router.get("/resume/supported-extensions", response_model=SupportedExtensions)
@@ -47,8 +44,6 @@ def supported_extensions():
 async def parse_resume(
     current_user: CurrentUser,
     file: UploadFile = File(...),
-    parser: ResumeFileParser = Depends(get_resume_parser),
-    tm: TaskManager = Depends(get_task_manager),
 ):
     file_bytes = await file.read()
     filename = file.filename or 'resume'
@@ -56,19 +51,13 @@ async def parse_resume(
     if ext not in SUPPORTED_EXTENSIONS:
         raise HTTPException(status_code=400, detail=f"不支持的文件格式: {ext or '未知'}")
 
-    def run_fn(progress):
-        progress("queued", "排队等待解析槽位", 5)
-        with _parse_semaphore():
-            progress("parsing", "MinerU解析中", 50)
-            text = parser.parse(filename, file_bytes)
-            out = settings.paths.resume_uploads_dir / \
-                f"{uuid4().hex}.md"  # 独立 uuid 命名(不用 task_id,避免改 RunFn 签名)
-            out.write_text(text, encoding="utf-8")
-            progress("parsing", "解析完成,写入结果", 90)
-            return str(out)
+    # 字节落盘:消息只带路径字符串(可序列化),不带字节本体
+    upload = settings.paths.resume_uploads_dir / f"{uuid4().hex}.upload{ext}"
+    upload.write_bytes(file_bytes)
 
-    task_id = tm.submit("parse-resume", run_fn,
-                        user_id=current_user.id, filename=filename)
+    task_id = uuid4().hex
+    insert_task(task_id=task_id, task="parse-resume", user_id=current_user.id, filename=filename)
+    parse_resume_task.apply_async(args=(str(upload), filename), task_id=task_id)
     return ResumeParseAck(task_id=task_id, status="pending")
 
 
@@ -76,15 +65,11 @@ async def parse_resume(
 async def parse_status(
     task_id: str,
     current_user: CurrentUser,
-    tm: Annotated[TaskManager, Depends(get_task_manager)],
     db: Annotated[AsyncSession, Depends(get_async_session)],
 ):
     '''获取任务状态（轮询）'''
-    task_rec = tm.get(task_id)
+    task_rec = (await db.execute(select(models.BuildTask).where(models.BuildTask.task_id == task_id, models.BuildTask.user_id == current_user.id, models.BuildTask.task == "parse-resume"))).scalars().first()
     if task_rec is None:
-        # 存在内存里的任务找不到，去数据库里找
-        task_rec = (await db.execute(select(models.BuildTask).where(models.BuildTask.task_id == task_id))).scalars().first()
-    if task_rec is None or task_rec.user_id != current_user.id or task_rec.task != "parse-resume":
         raise HTTPException(status_code=404, detail="task not found")
 
     content = None
@@ -110,15 +95,11 @@ async def parse_status(
 def parse_stream(
     task_id: str,
     current_user: CurrentUser,
-    tm: TaskManager = Depends(get_task_manager)
+    db: Annotated[Session, Depends(get_session)],
 ):
-    """订阅简历解析任务进度 SSE:重放历史 + 实时推送,直到 done"""
-    rec = tm.get(task_id)
-    if rec is None or rec.user_id != current_user.id or rec.task != "parse-resume":
+    """订阅简历解析任务进度 SSE:DB 快照首帧 + 轮询转发,直到 done 帧"""
+    task_rec = db.execute(select(models.BuildTask).where(models.BuildTask.task_id == task_id, models.BuildTask.user_id == current_user.id, models.BuildTask.task == "parse-resume"))
+    if task_rec.scalars().first() is None:
         raise HTTPException(status_code=404, detail="task not found")
 
-    def gen():
-        for ev in tm.subscribe(task_id):
-            yield sse_format(ev["event"], ev["data"])
-
-    return StreamingResponse(gen(), media_type=SSE_MEDIA_TYPE, headers=SSE_HEADERS)
+    return StreamingResponse(stream_task_events(task_id), media_type=SSE_MEDIA_TYPE, headers=SSE_HEADERS)

@@ -65,12 +65,21 @@ build_frontend() {
 }
 
 # ---------------------------------------------------------------- 后端/服务
+restart_workers() {
+    # celery worker 不热重载：不重启则内存里还是旧任务体（老部署机无 worker 单元时静默跳过）
+    for u in resume-agent-worker-resume resume-agent-worker-knowledge; do
+        # || true：set -e 下短路返回非零会退出脚本（老部署机无 worker 单元）
+        { [ -f "/etc/systemd/system/$u.service" ] && systemctl restart "$u"; } || true
+    done
+}
+
 restart_service() {
     if [ "$MODE" = "systemd" ]; then
         log "安装/更新后端依赖"
         "$VENV/bin/pip" install -r requirements-prod.txt -i "$PIP_INDEX" -q
-        log "重启 resume-agent 服务"
+        log "重启 resume-agent 服务（API + worker）"
         systemctl restart resume-agent
+        restart_workers
         for i in $(seq 1 30); do
             curl -fsS http://127.0.0.1:8000/api/health >/dev/null 2>&1 && break
             [ "$i" -eq 30 ] && { journalctl -u resume-agent -n 60 --no-pager; die "启动失败，请看上方日志"; }
@@ -100,8 +109,9 @@ case "$TARGET" in
             warn "Docker 模式下 data 内嵌镜像，需重建镜像"
             restart_service
         else
-            log "重启以重新加载索引"
+            log "重启以重新加载索引（API + worker）"
             systemctl restart resume-agent
+            restart_workers
             for i in $(seq 1 30); do
                 curl -fsS http://127.0.0.1:8000/api/health >/dev/null 2>&1 && break
                 sleep 2

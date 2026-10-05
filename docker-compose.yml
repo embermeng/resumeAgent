@@ -30,9 +30,11 @@ services:
       redis:
         condition: service_healthy
 
-    # 可选：需要在云端更新知识库时再启用挂载（首次需把索引复制到 ./runtime-data）
-    # volumes:
-    #   - ./runtime-data:/app/data
+    # Celery 正式化后必需:app 与两个 worker 共享数据卷——
+    # .upload 文件传递、解析产物、知识库索引更新都落在 /app/data
+    # (首次需把镜像内 data/ 的内容复制到 ./runtime-data,否则挂载会遮盖内置知识库)
+    volumes:
+      - ./runtime-data:/app/data
 
   redis:
     image: redis:7-alpine
@@ -45,3 +47,39 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
+
+  worker-resume:
+    # 简历解析消费者:复用 resume-agent 的镜像(不单独 build);
+    # DATABASE_URL 由 env_file 的 .env 提供(生产库外置,无需覆盖)
+    image: resume-agent:latest
+    container_name: resume-agent-worker-resume
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      TZ: Asia/Shanghai
+      REDIS_URL: redis://redis:6379/0
+    volumes:
+      # 必须与 app 同挂一个数据卷:消息只传 .upload 路径字符串,文件本体走共享卷
+      - ./runtime-data:/app/data
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: celery -A src.worker.celery_app worker --loglevel=info -Q resume --concurrency=2
+
+  worker-knowledge:
+    # 知识库构建消费者:concurrency=1 串行化(写共享索引文件不可并行)
+    image: resume-agent:latest
+    container_name: resume-agent-worker-knowledge
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      TZ: Asia/Shanghai
+      REDIS_URL: redis://redis:6379/0
+    volumes:
+      - ./runtime-data:/app/data
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: celery -A src.worker.celery_app worker --loglevel=info -Q knowledge --concurrency=1

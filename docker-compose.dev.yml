@@ -67,6 +67,51 @@ services:
       redis:
         condition: service_healthy
     command: uvicorn app_api:app --host 0.0.0.0 --port 8000 --reload
+  worker-resume:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: resume-agent-worker-resume-dev
+    # 简历解析消费者:与 app 同镜像(celery 已在 requirements-prod.txt)
+    # 只消费 resume 队列;--concurrency 即并发上限(替代原 API 进程内的 threading.Semaphore)
+    env_file:
+      - .env
+    environment:
+      # 正式化后 worker 要写 build_tasks(task_store),需要 DATABASE_URL 覆盖(同 app 规则)
+      DATABASE_URL: postgresql+psycopg://resume:resume@db:5432/resumeagent
+      REDIS_URL: redis://redis:6379/0
+      TZ: Asia/Shanghai
+    volumes:
+      # 必须与 app 共享同一源码挂载:生产者落盘的 .upload 文件,
+      # worker 按消息里的路径字符串读取(消息传引用不传本体)
+      - .:/app
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: celery -A src.worker.celery_app worker --loglevel=info -Q resume --concurrency=2
+  worker-knowledge:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: resume-agent-worker-knowledge-dev
+    # 知识库构建消费者:只消费 knowledge 队列;--concurrency=1 是硬保证——
+    # 构建写共享 BM25/FAISS 索引文件,天然不可并行,用队列串行化
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://resume:resume@db:5432/resumeagent
+      REDIS_URL: redis://redis:6379/0
+      TZ: Asia/Shanghai
+    volumes:
+      - .:/app
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: celery -A src.worker.celery_app worker --loglevel=info -Q knowledge --concurrency=1
 
 volumes:
   pgdata_dev:

@@ -44,7 +44,11 @@ grep -qE "^(DASHSCOPE|OPENAI|GEMINI)_API_KEY=[[:print:]]+" "$APP_DIR/.env" \
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
-apt-get install -y python3 python3-venv python3-pip curl ca-certificates apache2-utils
+apt-get install -y python3 python3-venv python3-pip curl ca-certificates apache2-utils redis-server
+
+# Celery broker/backend 依赖 Redis（任务队列 + 检索缓存）
+systemctl enable --now redis-server
+redis-cli ping >/dev/null 2>&1 || die "Redis 启动失败：systemctl status redis-server"
 
 # ---------------------------------------------------------------- 1. 前端产物
 if [ "$SKIP_FRONTEND_BUILD" != "1" ] && [ ! -f "$APP_DIR/frontend/dist/index.html" ]; then
@@ -74,11 +78,11 @@ log "安装后端依赖（约 3~8 分钟）"
 "$VENV/bin/pip" install -r requirements-prod.txt -i "$PIP_INDEX"
 
 # ---------------------------------------------------------------- 3. systemd 服务
-log "注册 systemd 服务"
+log "注册 systemd 服务（API + 两个 celery worker）"
 cat > /etc/systemd/system/resume-agent.service <<EOF
 [Unit]
 Description=ResumeAgent API (uvicorn)
-After=network.target
+After=network.target redis-server.service
 
 [Service]
 Type=simple
@@ -94,8 +98,34 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
+# 后台任务 worker：与 docker 模式同一套队列拆分（resume 并发 2 / knowledge 串行）。
+# REDIS_URL 写在 EnvironmentFile 之后→覆盖 .env：本机模式固定连本地 Redis；
+# 若用外部 Redis，删掉这行 Environment 并在 .env 里配 REDIS_URL。
+for q in "resume 2" "knowledge 1"; do
+    set -- $q
+    QUEUE="$1"; CONC="$2"
+    cat > /etc/systemd/system/resume-agent-worker-$QUEUE.service <<EOF
+[Unit]
+Description=ResumeAgent Celery worker (queue: $QUEUE)
+After=network.target redis-server.service
+
+[Service]
+Type=simple
+WorkingDirectory=$APP_DIR
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=$APP_DIR/.env
+Environment=REDIS_URL=redis://localhost:6379/0
+ExecStart=$VENV/bin/celery -A src.worker.celery_app worker --loglevel=info -Q $QUEUE --concurrency=$CONC
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+done
+
 systemctl daemon-reload
-systemctl enable --now resume-agent
+systemctl enable --now resume-agent resume-agent-worker-resume resume-agent-worker-knowledge
 
 log "等待健康检查通过"
 for i in $(seq 1 40); do
@@ -158,6 +188,6 @@ if [ -n "$DOMAIN" ] && ! [[ "$DOMAIN" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; th
 else
     echo "  访问地址：http://<你的公网IP>"
 fi
-echo "  查看日志：journalctl -u resume-agent -f"
-echo "  重启服务：systemctl restart resume-agent"
-echo "  停止服务：systemctl stop resume-agent"
+echo "  查看日志：journalctl -u resume-agent -f（API）/ -u resume-agent-worker-resume -f（解析 worker）"
+echo "  重启服务：systemctl restart resume-agent resume-agent-worker-resume resume-agent-worker-knowledge"
+echo "  停止服务：systemctl stop resume-agent resume-agent-worker-resume resume-agent-worker-knowledge"

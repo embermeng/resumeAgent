@@ -52,12 +52,12 @@
 ### 落地
 
 - [x] 对话记录与任务状态从文件系统迁入 PostgreSQL（conversations / messages / build_tasks）
-- [ ] 检索结果加 Redis 缓存层
+- [x] 检索结果加 Redis 缓存层
 
 ### 验收
 
 - [x] 给一条慢 SQL 能说出为什么慢、索引怎么加
-- [ ] 能画出缓存与 DB 的读写时序
+- [x] 能画出缓存与 DB 的读写时序
 
 ## 阶段 2｜第 6~10 周：认证与异步
 
@@ -65,7 +65,7 @@
 
 - [x] JWT 全链路：access/refresh 轮换、前端 token 存储安全、XSS/CSRF
 - [x] asyncio：事件循环、信号量并发控制
-- [ ] 后台任务：BackgroundTasks → Celery 的设计思想
+- [x] 后台任务：BackgroundTasks → Celery 的设计思想
 
 ### 落地
 
