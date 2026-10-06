@@ -19,12 +19,14 @@ SSE_HEADERS = {
 }
 
 
-def sse_format(event: str, data: Dict[str, Any]) -> str:
+def sse_format(event: str, data: Dict[str, Any], seq: int | None = None) -> str:
     """把事件名与数据字典封装成标准 SSE 帧。
 
     - data 序列化为单行 JSON;ensure_ascii=False 保留中文原文
     - 内容中的换行由 json 转义为 \\n,保证 data 恒为单行,符合 SSE 规范
     - 帧以空行(\n\n)结尾,供客户端按 \n\n 切帧
+    - seq 为帧序号
     """
     payload = json.dumps(data, ensure_ascii=False)
-    return f"event: {event}\ndata: {payload}\n\n"
+    id_line = f"id: {seq}\n" if seq is not None else ""   # id 行在 event 前(SSE 规范)
+    return f"{id_line}event: {event}\ndata: {payload}\n\n"

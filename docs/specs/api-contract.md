@@ -26,6 +26,7 @@ X-Accel-Buffering: no
 每个事件是一帧,格式如下,帧与帧之间以空行(`\n\n`)分隔:
 
 ```
+id: <可选:单调递增整数序号 seq>
 event: <事件名>
 data: <单行 JSON>
 
@@ -35,10 +36,11 @@ data: <单行 JSON>
 - `data` 必须是**单行** JSON;内容中的换行由 `json.dumps` 转义为 `\n`,不会出现裸换行。
 - `data` 使用 `ensure_ascii=False`,中文原样传输。
 - 客户端按 `\n\n` 切帧;需处理"半帧跨 chunk"的情况(缓冲不完整片段到下次)。
+- `id`(可选):**仅可重放的流**(§4.2 对话流)使用,值为该事件在本次流内的单调递增序号 `seq`(从 0 起)。客户端记录最后收到的 `id`,断线重连时经 `Last-Event-ID` 头或 `after` 查询参数回传,服务端只重放 `seq` 更大的事件(见 §4.2.1)。不带 `id` 的流(任务进度流 §4.5/§4.8)按快照重放,无需序号。前端 SSE 解析器需相应解析并保留 `id` 字段(见 §6)。
 
 ### 1.2 认证约定
 
-- **受保护接口**:#2 `POST /api/chat`、#3 `POST /api/resume/parse`、#4 `GET /api/resume/parse/{task_id}`、#5 `GET /api/resume/parse/{task_id}/stream`、#11 `GET /api/conversations`、#12 `GET /api/conversations/{id}/messages`、#19 `PATCH` 与 #20 `DELETE /api/auth/{user_id}`(仅限本人)。其余接口(health、#6 supported-extensions、knowledge、#18 用户查询)开放。
+- **受保护接口**:#2 `POST /api/chat`、#2b `GET /api/chat/{stream_id}/stream`、#3 `POST /api/resume/parse`、#4 `GET /api/resume/parse/{task_id}`、#5 `GET /api/resume/parse/{task_id}/stream`、#11 `GET /api/conversations`、#12 `GET /api/conversations/{id}/messages`、#19 `PATCH` 与 #20 `DELETE /api/auth/{user_id}`(仅限本人)。其余接口(health、#6 supported-extensions、knowledge、#18 用户查询)开放。
 - **请求头**:`Authorization: Bearer <access_token>`。SSE 受保护接口同样走此头(前端用 fetch 流式请求,不受 EventSource 无法带头的限制)。
 - **JWT**:HS256 签名;payload 含 `sub`(用户 id 字符串)、`exp`、`type`(`"access"` / `"refresh"`)。密钥取自环境变量 `SECRET_KEY`(经 .env / compose env_file 注入);TTL 由 `src/config.py` 的 `AuthConfig` 配置(代码中经 `settings.auth.*` 访问):`access_token_expire_minutes`(默认 60 分钟)、`refresh_token_expire_minutes`(默认 7×24×60)。
 - **401 矩阵**(受保护接口):
@@ -140,7 +142,8 @@ refresh token 只经 httpOnly cookie 下发,不出现在任何 JSON 响应体中
 | # | 方法 | 路径 | 类型 | 说明 |
 |---|---|---|---|---|
 | 1 | GET | `/api/health` | JSON | 健康检查 |
-| 2 | POST | `/api/chat` | SSE | 流式对话(问答/简历生成/闲聊)🔒 |
+| 2 | POST | `/api/chat` | SSE | 流式对话(问答/简历生成/闲聊);事件序号化 + 双写 Redis,支持断线重放(降级:生成绑定连接) 🔒 |
+| 2b | GET | `/api/chat/{stream_id}/stream` | SSE | 重连一次对话生成,从指定序号重放已缓冲事件直到终态 🔒 |
 | 3 | POST | `/api/resume/parse` | JSON(202) | 提交简历解析后台任务,返回 `task_id`(不再同步返回内容)🔒 |
 | 4 | GET | `/api/resume/parse/{task_id}` | JSON | 查询简历解析任务状态/结果(轮询兜底)🔒 |
 | 5 | GET | `/api/resume/parse/{task_id}/stream` | SSE | 订阅简历解析任务进度 🔒 |
@@ -178,19 +181,35 @@ refresh token 只经 httpOnly cookie 下发,不出现在任何 JSON 响应体中
 - 新建会话时服务端将 `user_id` 记为当前用户。
 - 运行时错误 → `event: error` 帧。
 
-对话 SSE 事件协议:
+**断线重放(当前实现:生成绑定 HTTP 连接)**:
+
+为支持"断线重连 + 已生成内容保全",`POST /api/chat` 在请求内迭代 `run_stream()` 生成,每个事件推送前双写 Redis 重放缓冲(带 `seq`);断线后生成随连接终止并补 `interrupted` 终态,§4.2.1 用 `stream_id` + 最后 `seq` 重放**到断点为止**的已产出事件(不续接未生成部分)。这是相对"完全后台化"的**降级实现**(取舍见本节末「实现强度说明」),端点/序号/去重/404 契约与完全后台化一致:
+
+1. **stream_id**:服务端为每次 `POST /api/chat` 生成唯一 `stream_id`(uuid4),标识"这一次生成",经**流首帧** `conversation` 下发。
+2. **事件序号 seq**:本次生成的每个事件按产出顺序分配单调递增整数 `seq`(从 0 起),写入 SSE 帧的 `id:` 字段(§1.1)。`conversation` 首帧 `seq=0`。
+3. **事件缓冲(Redis)**:每个事件推送前,以 `{seq, event, data}` 追加写入 Redis 列表 `chat:stream:{stream_id}`,设 TTL(默认 `CHAT_STREAM_BUFFER_TTL=3600` 秒)。这是**瞬态重放缓冲**,非业务数据;最终 assistant 消息仍照常落 `messages` 表(不变)。选 Redis 而非 PostgreSQL:事件序列短命(覆盖重连窗口即可)、TTL 自动回收、复用现有 `redis_client` 基建,避免表膨胀。
+4. **生成与连接绑定(降级)**:`run_stream()` 由 `StreamingResponse` 经线程池(`iterate_in_threadpool`)在请求内迭代,逐事件"分配 seq → 写 Redis → yield 给当前连接"。客户端断开**会终止生成**:ASGI 取消响应后,同步生成器在**下一个 yield 点**收到 `GeneratorExit`(生成器常阻塞在 `next()` 等 LLM,故断开到终止之间有秒级延迟),进入 `finally`:①把已生成文本落 `messages` 表;②若缓冲末尾非终态,补写 `done {step:"interrupted"}` 到 Redis(不能 yield,生成器正在关闭)。首 token 低延迟特性保持(请求内直推,无额外 broker 往返)。
+5. `POST /api/chat` 的响应流即"首个订阅者":从 `seq=0` 开始推送。若客户端中途断开,可经 §4.2.1 用 `stream_id` + 最后 `seq` 重新订阅,**重放到断点**(含断开后、`GeneratorExit` 前多产出并已入缓冲的少量事件),以 `done {step:"interrupted"}` 收尾;**不续接尚未生成的部分**(区别于完全后台化)。
+
+对话 SSE 事件协议(每帧带 `id: <seq>`):
 
 ```
-event: conversation data: {"conversation_id":42}
+id: 0
+event: conversation data: {"conversation_id":42,"stream_id":"<uuid>"}
+id: 1
 event: status   data: {"text":"正在识别意图..."}
+id: 2
 event: intent   data: {"value":"quick_response"}
+id: 3
 event: token    data: {"text":"RAG"}
+...
+id: N
 event: done     data: {"intent":"quick_response","step":"quick_response_done","resume_final":"","retrieved_knowledge":"...","retrieved_projects":""}
 event: error    data: {"message":"..."}
 ```
 
 事件字段说明:
-- `conversation`:`{conversation_id: int}` **流首帧**,回传本次对话所属会话 id(新建或沿用);前端存 sessionStorage,后续消息经 `ChatRequest.conversation_id` 回传以归入同一会话。
+- `conversation`:`{conversation_id: int, stream_id: string}` **流首帧**(seq=0),回传本次对话所属会话 id(新建或沿用)与本次生成的 `stream_id`。前端:`conversation_id` 存 sessionStorage(归属后续消息、刷新续接同一会话);`stream_id` + 最后 `seq` **仅存内存**,用于**页面内**断网自动重连(§4.2.1)。**刷新**场景不靠 `stream_id` 重连(内存已丢),而是从 sessionStorage 的**流式草稿**(节流保全的已生成内容)恢复(见 §7)。
 - `status`:`{text}` 阶段进度提示(深思路径会有多条)。
 - `intent`:`{value: Intent}` 意图识别结果,通常在首个 status 之后到达。
 - `token`:`{text}` 回答文本增量(quick_response/chitchat 逐块;deep_thinking 一次性给出整份简历文本)。
@@ -201,6 +220,24 @@ event: error    data: {"message":"..."}
 - 一定以 `conversation` 开头(恰一次),其后 `status`,以 `done` 或 `error` 结尾。
 - `intent` 恰出现一次,在首个 `status` 之后。
 - `token` 出现 0 次或多次。
+- `seq` 严格单调递增、无空洞;重放与实时推送共用同一 `seq` 空间(同一 `stream_id` 内全局唯一)。
+
+### 4.2.1 GET /api/chat/{stream_id}/stream(SSE)
+
+断线重连 / 续订一次对话生成。语义对齐 §4.5「订阅时若已结束则补发终态」。
+
+- 鉴权:需 Bearer access token;**401/404 校验必须在建立流(`StreamingResponse`)之前完成**,返回真实状态码而非 error 帧。
+- 归属校验:`stream_id` 无对应缓冲(Redis 键不存在,含 TTL 过期)**或不属于当前用户** → `404` `{"detail": "stream not found"}`(同判据,不泄露存在性)。归属经 `stream_id → conversation_id → user_id` 链校验。
+- 重放起点(二选一,`Last-Event-ID` 优先):
+  - 请求头 `Last-Event-ID: <seq>`(SSE 标准;本项目 fetch 手写流由前端显式设置);
+  - 或查询参数 `?after=<seq>`;
+  - 两者都缺省时 `after=-1`(从头全量重放)。
+- 行为:先从 Redis 重放所有 `seq > after` 的**已缓冲事件**(按 seq 升序),随后**轮询**(0.15s/次)等新事件直到读到终态帧(`done`/`error`)或 300s 超时(超时补 `done {step:"timeout"}` 收流)。降级实现下断线后生成已在终止,故重连通常是"重放已缓冲事件 → 等到 `finally` 补写的 `done {step:"interrupted"}` → 关闭流";因 `GeneratorExit` 有秒级延迟,重连可能先重放完再**短暂等待**终态(前端以「恢复中」状态呈现)。
+- 幂等/去重:服务端保证只发 `seq > after` 的事件;前端另按 `seq` 去重(丢弃 `seq <= 已应用最大 seq` 的帧),双重保证 `token` 不重复拼接。
+- 缓冲已过期/不存在(GET 返回 404):前端**不自动重发**(会重复生成),而是降级为「保全本地已生成内容」——把断点前内容标记为中断并写入草稿,用户可手动重试或刷新后从草稿恢复(见 §7)。此时 `messages` 表通常已有该次 assistant 消息(`finally` 落库,含断开后补产出的尾部),如需比本地草稿更全的文本,可选经 §4.12 拉取回填(当前前端未做此拉取,以本地草稿为准)。
+- 事件协议与 §4.2 完全一致(含 `id:` 序号)。
+
+> **实现强度说明(当前采用降级版)**:本项目采用**降级实现**——`POST /api/chat` 在请求内迭代生成、每事件双写 Redis(带 seq);断线则生成随连接终止(补 `interrupted`),§4.2.1 仅重放到断点为止、**不续接未生成部分**。**完全后台化**(把 `run_stream()` 移到与连接解耦的后台任务,断开后继续跑完并持续写 Redis,重连可续接到完整答案)为**未来可选升级,当前不做**。两版下 §4.2.1 的端点/序号/去重/404 契约完全一致,仅"断线后生成是否继续"的强度不同,**前端代码对两版无感知**(将来升级到完全后台化时前端无需改动)。
 
 ### 4.3 POST /api/resume/parse
 
@@ -363,7 +400,7 @@ export type TaskKind =
 export type TaskState = 'pending' | 'running' | 'success' | 'failed'
 
 export type ChatEvent =
-  | { type: 'conversation'; conversation_id: number }
+  | { type: 'conversation'; conversation_id: number; stream_id: string }
   | { type: 'status'; text: string }
   | { type: 'intent'; value: Intent }
   | { type: 'token'; text: string }
@@ -387,8 +424,11 @@ export interface ResumeParseStatus {
 }
 ```
 
+前端 SSE 解析器(`frontend/src/composables/sse.ts`)需扩展:`SSEFrame` 增加可选 `id?: string` 字段,`parseFrame` 解析 `id:` 行(当前实现显式忽略 id/retry,需改为保留 id);`useChatStream` 记录最后 `seq`(=parseInt(id))与首帧 `stream_id`,非正常结束时用它们请求 §4.2.1 自动重连,并对 `seq <= lastSeq` 的帧去重。
+
 ## 7. 兼容性说明
 
 - **`POST /api/resume/parse` 破坏性变更**:由同步返回解析内容改为异步任务(`202` + `task_id`);前端上传流程随之改为「提交 → SSE/轮询进度 → 成功后取 `content`」,旧同步行为不再保留。
 - 现有 `app_streamlit.py` 与 `main.py` CLI 保留;`main.py` 的 `cmd_*` 委托 `knowledge_service`,CLI 行为不变(有回归测试)。
-- 对话 SSE 事件与 `run_stream()` 现有事件字典一一对应,后端仅做"字典 → SSE 帧"的封装,不改动 Agent 逻辑。
+- 对话 SSE 事件与 `run_stream()` 现有事件字典一一对应,后端仅做"字典 → SSE 帧"的封装,不改动 Agent 逻辑(事件序号 seq 与 stream_id 为**外层封装**新增,不侵入 run_stream 事件本身)。
+- **对话流断线重放(§4.2/§4.2.1)向后兼容**:`POST /api/chat` 仅在 `conversation` 首帧增加 `stream_id` 字段、每帧可选带 `id:` 序号;不消费重连的旧前端忽略这两者即可正常工作(事件名/顺序/既有字段不变)。新增 `GET /api/chat/{stream_id}/stream` 为纯增量端点。后端**当前为"降级实现"**(断线生成终止、仅重放已产出);"完全后台化"(断线生成继续)为未来可选升级,前端无感知(见 §4.2.1「实现强度说明」)。**前端降级/保全策略**:①页面内断网 → 用内存中的 `stream_id`+`seq` 自动重连续传(§4.2.1);②重连遇 `404`(缓冲过期)或多次失败 → 不自动重发,保全本地已生成内容(标记中断 + 写草稿);③刷新 → 从 sessionStorage 草稿恢复已生成内容。三者共同保证"已生成内容保全"验收(可选增强:404 时经 §4.12 拉取落库的完整消息回填,当前未做)。

@@ -19,7 +19,7 @@ export type TaskState = 'pending' | 'running' | 'success' | 'failed'
 
 // ---- 对话 SSE 事件(契约 4.2),type 为判别字段 ----
 export type ChatEvent =
-  | { type: 'conversation'; conversation_id: number }
+  | { type: 'conversation'; conversation_id: number; stream_id?: string }
   | { type: 'status'; text: string }
   | { type: 'intent'; value: Intent }
   | { type: 'token'; text: string }
@@ -193,4 +193,6 @@ export interface UserUpdate {
 export interface SSEFrame {
   event: string
   data: string
+  /** SSE id 字段:对话流用它承载单调递增 seq(断线重连按此去重与续传);任务流等无 id 时为 undefined */
+  id?: string
 }

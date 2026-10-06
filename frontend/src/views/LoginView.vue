@@ -69,39 +69,52 @@ async function onSubmit() {
 
 <template>
   <div class="login-view">
-    <el-card class="login-card" shadow="always">
-      <div class="brand">📄 ResumeAgent</div>
-      <h2 class="title">{{ mode === 'login' ? '登录' : '注册' }}</h2>
-
-      <el-form ref="formRef" :model="form" :rules="rules" label-position="top" @submit.prevent="onSubmit">
-        <el-form-item v-if="mode === 'register'" label="用户名" prop="username">
-          <el-input v-model="form.username" placeholder="1~50 字符" maxlength="50" />
-        </el-form-item>
-        <el-form-item label="邮箱" prop="email">
-          <el-input v-model="form.email" type="email" placeholder="you@example.com" />
-        </el-form-item>
-        <el-form-item label="密码" prop="password">
-          <el-input v-model="form.password" type="password" show-password placeholder="至少 8 位" />
-        </el-form-item>
-
-        <el-alert v-if="errorMsg" :title="errorMsg" type="error" show-icon :closable="false" class="err" />
-
-        <el-button type="primary" class="submit" native-type="submit" :loading="auth.loading">
-          {{ mode === 'login' ? '登录' : '注册并登录' }}
-        </el-button>
-      </el-form>
-
-      <div class="switch">
-        <template v-if="mode === 'login'">
-          还没有账号?
-          <el-link type="primary" @click="switchMode('register')">去注册</el-link>
-        </template>
-        <template v-else>
-          已有账号?
-          <el-link type="primary" @click="switchMode('login')">去登录</el-link>
-        </template>
+    <div class="login-shell">
+      <!-- 品牌展示区:纯装饰,不含任何表单控件(保证登录模式仅 2 个 input) -->
+      <div class="brand-panel">
+        <div class="brand-logo">📄</div>
+        <h1 class="brand-name">ResumeAgent</h1>
+        <p class="brand-desc">基于 LangGraph + RAG 的智能简历生成助手</p>
+        <ul class="brand-points">
+          <li>💡 课程知识智能问答</li>
+          <li>🗂 项目素材自动组装</li>
+          <li>📝 一键生成与增强简历</li>
+        </ul>
       </div>
-    </el-card>
+
+      <el-card class="login-card" shadow="always">
+        <h2 class="title">{{ mode === 'login' ? '登录' : '注册' }}</h2>
+
+        <el-form ref="formRef" :model="form" :rules="rules" label-position="top" @submit.prevent="onSubmit">
+          <el-form-item v-if="mode === 'register'" label="用户名" prop="username">
+            <el-input v-model="form.username" placeholder="1~50 字符" maxlength="50" />
+          </el-form-item>
+          <el-form-item label="邮箱" prop="email">
+            <el-input v-model="form.email" type="email" placeholder="you@example.com" />
+          </el-form-item>
+          <el-form-item label="密码" prop="password">
+            <el-input v-model="form.password" type="password" show-password placeholder="至少 8 位" />
+          </el-form-item>
+
+          <el-alert v-if="errorMsg" :title="errorMsg" type="error" show-icon :closable="false" class="err" />
+
+          <el-button type="primary" class="submit" native-type="submit" :loading="auth.loading">
+            {{ mode === 'login' ? '登录' : '注册并登录' }}
+          </el-button>
+        </el-form>
+
+        <div class="switch">
+          <template v-if="mode === 'login'">
+            还没有账号?
+            <el-link type="primary" @click="switchMode('register')">去注册</el-link>
+          </template>
+          <template v-else>
+            已有账号?
+            <el-link type="primary" @click="switchMode('login')">去登录</el-link>
+          </template>
+        </div>
+      </el-card>
+    </div>
   </div>
 </template>
 
@@ -111,31 +124,101 @@ async function onSubmit() {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: var(--el-fill-color-light);
+  padding: 24px;
+  background:
+    radial-gradient(1200px 600px at 15% 20%, rgba(99, 102, 241, 0.18), transparent 60%),
+    radial-gradient(1000px 500px at 85% 80%, rgba(139, 92, 246, 0.16), transparent 60%),
+    var(--rp-page-bg);
 }
+.login-shell {
+  display: flex;
+  align-items: stretch;
+  width: min(860px, 100%);
+  border-radius: 20px;
+  overflow: hidden;
+  box-shadow: 0 20px 60px rgba(15, 23, 42, 0.14);
+}
+/* 品牌展示区 */
+.brand-panel {
+  flex: 1 1 46%;
+  padding: 44px 36px;
+  color: #fff;
+  background: linear-gradient(150deg, var(--rp-brand-from), var(--rp-brand-to));
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 6px;
+}
+.brand-logo {
+  font-size: 40px;
+  filter: drop-shadow(0 4px 10px rgba(0, 0, 0, 0.2));
+}
+.brand-name {
+  margin: 8px 0 4px;
+  font-size: 30px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+.brand-desc {
+  margin: 0 0 22px;
+  font-size: 14px;
+  opacity: 0.92;
+  line-height: 1.6;
+}
+.brand-points {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  font-size: 14px;
+}
+.brand-points li {
+  padding-left: 4px;
+  opacity: 0.96;
+}
+/* 表单卡片 */
 .login-card {
-  width: 380px;
+  flex: 1 1 54%;
+  border: none;
+  border-radius: 0;
 }
-.brand {
-  font-weight: 700;
-  font-size: 18px;
-  text-align: center;
+.login-card :deep(.el-card__body) {
+  padding: 40px 36px;
 }
 .title {
-  margin: 8px 0 20px;
+  margin: 0 0 24px;
   text-align: center;
-  font-size: 20px;
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--el-text-color-primary);
 }
 .err {
   margin-bottom: 12px;
 }
 .submit {
   width: 100%;
+  height: 42px;
+  font-size: 15px;
+  font-weight: 600;
+  border-radius: 10px;
 }
 .switch {
-  margin-top: 16px;
+  margin-top: 18px;
   text-align: center;
   font-size: 13px;
   color: var(--el-text-color-secondary);
+}
+/* 窄屏隐藏品牌区,只留表单 */
+@media (max-width: 720px) {
+  .brand-panel {
+    display: none;
+  }
+  .login-shell {
+    width: 100%;
+    max-width: 400px;
+    border-radius: 16px;
+  }
 }
 </style>

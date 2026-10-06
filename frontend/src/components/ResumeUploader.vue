@@ -197,8 +197,21 @@ defineExpose({ isSupported, beforeUpload, httpRequest, phase, percent, statusMes
 .resume-uploader {
   width: 100%;
 }
+.resume-uploader :deep(.el-upload-dragger) {
+  border-radius: 12px;
+  border: 1px dashed var(--el-border-color);
+  padding: 28px 16px;
+  transition: all 0.2s;
+}
+.resume-uploader :deep(.el-upload-dragger:hover) {
+  border-color: var(--el-color-primary);
+  background: var(--el-color-primary-light-9);
+}
+.resume-uploader :deep(.el-icon--upload) {
+  color: var(--el-color-primary);
+}
 .upload-progress {
-  margin-top: 8px;
+  margin-top: 10px;
 }
 .progress-text {
   display: block;

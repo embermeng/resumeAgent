@@ -4,7 +4,7 @@ import type { SSEFrame } from '@/types/events'
  * 增量 SSE 帧解析器(契约 1.1)。
  * - 按 "\n\n" 切帧,支持"半帧跨 chunk"缓冲(不完整片段留到下次 feed)
  * - 解析每帧的 event: / data: 字段;data 多行按 SSE 规范以 \n 连接
- * - 忽略注释行(以 ":" 开头)与 id/retry 等无关字段
+ * - 解析 id 字段(对话流用它承载 seq,供断线重连去重/续传);忽略注释行(以 ":" 开头)与 retry 等无关字段
  * - feed 接受字符串或字节;字节经 TextDecoder(stream 模式)解码,
  *   多字节 UTF-8 字符即使被切到不同 chunk 也不会乱码
  */
@@ -16,6 +16,7 @@ export interface SSEParser {
 function parseFrame(raw: string): SSEFrame | null {
   if (!raw.trim()) return null
   let event = 'message'
+  let id: string | undefined
   const dataLines: string[] = []
   for (const line of raw.split('\n')) {
     if (line.startsWith(':')) continue
@@ -26,10 +27,15 @@ function parseFrame(raw: string): SSEFrame | null {
       // SSE 规范:data: 后若紧跟一个空格,该空格属于分隔符需去除
       if (v.startsWith(' ')) v = v.slice(1)
       dataLines.push(v)
+    } else if (line.startsWith('id:')) {
+      // SSE id 字段:对话流用它承载 seq(断线重连去重/续传);同样去除分隔空格
+      let v = line.slice('id:'.length)
+      if (v.startsWith(' ')) v = v.slice(1)
+      id = v
     }
   }
   if (dataLines.length === 0) return null
-  return { event, data: dataLines.join('\n') }
+  return { event, data: dataLines.join('\n'), id }
 }
 
 export function createSSEParser(onFrame: (frame: SSEFrame) => void): SSEParser {
@@ -72,15 +78,23 @@ export interface StreamSSEOptions {
   onFrame: (frame: SSEFrame) => void
 }
 
+/** streamSSE 对 HTTP 非 2xx 抛出的结构化错误(带 status,供断线重连区分 404 缓冲过期降级)。 */
+export class SSEHttpError extends Error {
+  constructor(public readonly status: number) {
+    super(`SSE 请求失败: HTTP ${status}`)
+    this.name = 'SSEHttpError'
+  }
+}
+
 /**
  * 用 fetch 打开 SSE 流并逐帧回调 onFrame,直到流结束。
  * EventSource 仅支持 GET 且不能自定义头,故对话(POST)统一走此实现。
- * 抛出:HTTP 非 2xx / 网络错误 / AbortError(由调用方区分主动中断)。
+ * 抛出:SSEHttpError(HTTP 非 2xx,带 status) / 网络错误(TypeError) / AbortError(主动中断)。
  */
 export async function streamSSE(opts: StreamSSEOptions): Promise<void> {
   const res = await fetch(opts.url, { ...opts.init, signal: opts.signal })
   if (!res.ok || !res.body) {
-    throw new Error(`SSE 请求失败: HTTP ${res.status}`)
+    throw new SSEHttpError(res.status)
   }
   const parser = createSSEParser(opts.onFrame)
   const reader = res.body.getReader()

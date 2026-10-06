@@ -119,20 +119,36 @@ async function run(kind: TaskKind) {
 </template>
 
 <style scoped>
+.knowledge-admin {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
 .actions {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
-  margin-bottom: 18px;
+  padding: 16px;
+  background: var(--el-bg-color);
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 14px;
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.05);
 }
-.progress-card {
-  border: 1px solid var(--el-border-color-light);
+.actions :deep(.el-button) {
+  border-radius: 10px;
+  font-weight: 500;
+}
+.progress-card,
+.history-card {
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 14px;
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.05);
 }
 .progress-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 10px;
+  margin-bottom: 12px;
 }
 .kind {
   font-weight: 600;
@@ -145,22 +161,28 @@ async function run(kind: TaskKind) {
 .err {
   margin-top: 10px;
 }
+/* 日志区:终端深色风格 */
 .logs {
   margin-top: 12px;
-  max-height: 220px;
+  max-height: 240px;
   overflow: auto;
-  background: var(--el-fill-color-lighter);
-  border-radius: 6px;
-  padding: 8px 12px;
-  font-family: Consolas, Monaco, monospace;
+  background: #1e1e2e;
+  border-radius: 10px;
+  padding: 12px 14px;
+  font-family: 'Fira Code', Consolas, Monaco, monospace;
   font-size: 12px;
 }
 .log-line {
   line-height: 1.7;
   white-space: pre-wrap;
+  color: #cdd6f4;
 }
-.history-card {
-  margin-top: 18px;
-  border: 1px solid var(--el-border-color-light);
+.log-line::before {
+  content: '› ';
+  color: #89b4fa;
+}
+.history-card :deep(.el-card__header) {
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--el-border-color-lighter);
 }
 </style>

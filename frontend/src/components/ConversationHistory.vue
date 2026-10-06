@@ -100,15 +100,17 @@ function fmtTime(epoch: number): string {
   display: flex;
   justify-content: space-between;
   gap: 8px;
-  padding: 8px 10px;
-  border-radius: 6px;
+  padding: 9px 12px;
+  border-radius: 8px;
   cursor: pointer;
+  transition: background 0.15s, box-shadow 0.15s;
 }
 .history-item:hover {
   background: var(--el-fill-color-light);
 }
 .history-item.active {
   background: var(--el-color-primary-light-9);
+  box-shadow: inset 3px 0 0 var(--el-color-primary);
 }
 .history-item .title {
   flex: 1;
@@ -116,6 +118,7 @@ function fmtTime(epoch: number): string {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-size: 13px;
 }
 .history-item .time {
   flex: 0 0 auto;

@@ -1,3 +1,31 @@
+/* ==========================================================================
+   全局设计系统:主题变量 + 基础样式
+   Element Plus 的 CSS 在 main.ts 中先于本文件引入,故此处对 :root 变量的
+   覆盖会生效(同等特异度、后加载优先)。
+   ========================================================================== */
+
+:root {
+  /* 品牌色:靛蓝 → 紫渐变,用于头像/hero/强调 */
+  --rp-brand-from: #6366f1;
+  --rp-brand-to: #8b5cf6;
+  --rp-brand-solid: #4f46e5;
+
+  /* 覆盖 Element Plus 主色为一套现代靛蓝(light 变体手工给出,避免依赖 mix) */
+  --el-color-primary: #4f46e5;
+  --el-color-primary-light-3: #7c75eb;
+  --el-color-primary-light-5: #a5a0f2;
+  --el-color-primary-light-7: #cdc9f8;
+  --el-color-primary-light-8: #e0ddfb;
+  --el-color-primary-light-9: #eeecfd;
+  --el-color-primary-dark-2: #3f38b7;
+
+  /* 圆角与页面底色 */
+  --el-border-radius-base: 8px;
+  --rp-page-bg: #f6f7f9;
+
+  color-scheme: light;
+}
+
 html,
 body,
 #app {
@@ -7,12 +35,30 @@ body,
 }
 
 body {
-  font-family: 'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB',
-    'Microsoft YaHei', Arial, sans-serif;
+  font-family: 'Inter', 'Helvetica Neue', Helvetica, 'PingFang SC',
+    'Hiragino Sans GB', 'Microsoft YaHei', Arial, sans-serif;
   color: var(--el-text-color-primary);
-  background-color: var(--el-bg-color-page);
+  background-color: var(--rp-page-bg);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 * {
   box-sizing: border-box;
+}
+
+/* 统一的细滚动条,替换各面板默认粗滚动条 */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(100, 116, 139, 0.3);
+  border-radius: 8px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(100, 116, 139, 0.5);
+}
+::-webkit-scrollbar-track {
+  background: transparent;
 }

@@ -191,6 +191,7 @@ class RedisConfig:
     cache_ttl_jitter: int = int(os.getenv("REDIS_CACHE_TTL_JITTER", "300"))  # 雪崩抖动上限
     empty_ttl: int = int(os.getenv("REDIS_CACHE_EMPTY_TTL", "60"))      # 空结果短 TTL(防穿透)
     key_prefix: str = os.getenv("REDIS_CACHE_PREFIX", "resumeagent:retrieval:v1:")
+    chat_stream_buffer_ttl: int = int(os.getenv("REDIS_CHAT_STREAM_BUFFER_TTL", "3600"))
 
 
 @dataclass

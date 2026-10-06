@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { setActivePinia, createPinia } from 'pinia'
 import { useChatStore } from './chat'
-import { sseResponse, stubFetch, jsonResponse } from '@/test/sse-helpers'
+import { sseResponse, sseDropResponse, stubFetch, jsonResponse } from '@/test/sse-helpers'
 
 beforeEach(() => {
   sessionStorage.clear()
@@ -238,5 +238,207 @@ describe('chat store', () => {
     await store.openConversation(1)
     expect(fetchMock).not.toHaveBeenCalled()
     expect(store.conversationId).toBeNull()
+  })
+
+  // ---- 并行线:工具时间线 / TTFT 埋点 / 重试 / 内容保全 ----
+
+  it('applyEvent: status 逐条收集 timeline 并结算上一阶段耗时', () => {
+    const store = useChatStore()
+    const msg = pushAssistant(store)
+    store.applyEvent(msg, { type: 'status', text: '阶段一' })
+    expect(msg.timeline).toHaveLength(1)
+    expect(msg.timeline![0].elapsed).toBeNull()
+    store.applyEvent(msg, { type: 'status', text: '阶段二' })
+    expect(msg.timeline).toHaveLength(2)
+    expect(typeof msg.timeline![0].elapsed).toBe('number')
+    expect(msg.timeline![1].elapsed).toBeNull()
+  })
+
+  it('applyEvent: done 结算末阶段耗时', () => {
+    const store = useChatStore()
+    const msg = pushAssistant(store)
+    store.applyEvent(msg, { type: 'status', text: '阶段一' })
+    store.applyEvent(msg, { type: 'done', intent: 'chitchat', step: 'chitchat_done' })
+    expect(msg.timeline![0].elapsed).not.toBeNull()
+  })
+
+  it('send: 首个 token 记录 ttftMs,done 记录 elapsedMs', async () => {
+    stubFetch(async () =>
+      sseResponse([
+        'event: token\ndata: {"text":"a"}\n\n',
+        'event: done\ndata: {"intent":"chitchat","step":"chitchat_done"}\n\n',
+      ]),
+    )
+    const store = useChatStore()
+    await store.send('hi')
+    const msg = store.messages[1]
+    expect(typeof msg.ttftMs).toBe('number')
+    expect(typeof msg.elapsedMs).toBe('number')
+  })
+
+  it('send: 流正常结束(done)后清除保全草稿', async () => {
+    stubFetch(async () =>
+      sseResponse([
+        'event: token\ndata: {"text":"内容"}\n\n',
+        'event: done\ndata: {"intent":"chitchat","step":"chitchat_done"}\n\n',
+      ]),
+    )
+    const store = useChatStore()
+    await store.send('hi')
+    expect(sessionStorage.getItem('resumeagent.draft')).toBeNull()
+  })
+
+  it('retryMessage: 复用助手气泡重发同一 prompt,retryCount++', async () => {
+    const fetchMock = stubFetch(async () =>
+      sseResponse([
+        'event: token\ndata: {"text":"部分"}\n\n',
+        'event: error\ndata: {"message":"断线"}\n\n',
+      ]),
+    )
+    const store = useChatStore()
+    await store.send('问题')
+    const assistantId = store.messages[1].id
+    expect(store.messages[1].error).toBe('断线')
+    fetchMock.mockImplementation(async () =>
+      sseResponse([
+        'event: token\ndata: {"text":"完整答案"}\n\n',
+        'event: done\ndata: {"intent":"chitchat","step":"chitchat_done"}\n\n',
+      ]),
+    )
+    await store.retryMessage(assistantId)
+    expect(store.messages).toHaveLength(2) // 未新增消息对
+    expect(store.messages[1].content).toBe('完整答案')
+    expect(store.messages[1].retryCount).toBe(1)
+    expect(store.messages[1].error).toBeNull()
+    expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body)).prompt).toBe('问题')
+  })
+
+  it('retryMessage: streaming 期间不重入', async () => {
+    const fetchMock = stubFetch(async () => sseResponse(['event: done\ndata: {"intent":"chitchat","step":"x"}\n\n']))
+    const store = useChatStore()
+    store.messages.push({ id: 'u', role: 'user', content: 'q' })
+    store.messages.push({ id: 'a', role: 'assistant', content: '', error: 'x' })
+    store.streaming = true
+    await store.retryMessage('a')
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('restoreDraft: 恢复为 user+assistant 消息并回填会话、清除草稿', () => {
+    const store = useChatStore()
+    store.recoverableDraft = { prompt: '原问题', content: '已生成部分', conversationId: 8, savedAt: 1 }
+    store.restoreDraft()
+    expect(store.messages).toHaveLength(2)
+    expect(store.messages[0]).toMatchObject({ role: 'user', content: '原问题' })
+    expect(store.messages[1]).toMatchObject({ role: 'assistant', content: '已生成部分' })
+    expect(store.messages[1].error).toBeTruthy()
+    expect(store.conversationId).toBe(8)
+    expect(store.recoverableDraft).toBeNull()
+  })
+
+  it('restoreDraft: prompt 为空(手动停止)时不伪造 user 消息', () => {
+    const store = useChatStore()
+    store.recoverableDraft = { prompt: '', content: '停止前内容', conversationId: null, savedAt: 1 }
+    store.restoreDraft()
+    expect(store.messages).toHaveLength(1)
+    expect(store.messages[0].role).toBe('assistant')
+  })
+
+  it('discardDraft: 放弃草稿', () => {
+    const store = useChatStore()
+    store.recoverableDraft = { prompt: 'q', content: 'c', conversationId: null, savedAt: 1 }
+    store.discardDraft()
+    expect(store.recoverableDraft).toBeNull()
+  })
+
+  it('初始化时从 sessionStorage 读回可恢复草稿', () => {
+    sessionStorage.setItem(
+      'resumeagent.draft',
+      JSON.stringify({ prompt: 'q', content: '部分', conversationId: null, savedAt: 1 }),
+    )
+    const store = useChatStore()
+    expect(store.recoverableDraft?.content).toBe('部分')
+  })
+
+  // ---- 并行线:断线自动重连(接后端 GET /chat/{stream_id}/stream 续传) ----
+
+  it('send: 断线自动重连,重连期间 reconnecting=true,续传补齐内容后清草稿', async () => {
+    let resolveGet: ((r: Response) => void) | null = null
+    const fetchMock = stubFetch((url) => {
+      if (url === '/api/chat') {
+        return Promise.resolve(
+          sseDropResponse([
+            'id: 0\nevent: conversation\ndata: {"conversation_id":7,"stream_id":"s1"}\n\n',
+            'id: 1\nevent: token\ndata: {"text":"前半"}\n\n',
+          ]),
+        )
+      }
+      // GET 重连挂起,由测试手动 resolve(模拟后端轮询等终态的延迟)
+      return new Promise<Response>((res) => {
+        resolveGet = res
+      })
+    })
+    const store = useChatStore()
+    const p = store.send('问题')
+    // 等 POST 断线 + 退避后 GET 被发起并挂起
+    await vi.waitFor(() => expect(resolveGet).not.toBeNull(), { timeout: 2000 })
+    expect(store.reconnecting).toBe(true)
+    // 后端续传:重放 seq1(去重)+seq2+终态
+    resolveGet!(
+      sseResponse([
+        'id: 1\nevent: token\ndata: {"text":"前半"}\n\n',
+        'id: 2\nevent: token\ndata: {"text":"后半"}\n\n',
+        'id: 3\nevent: done\ndata: {"intent":"chitchat","step":"interrupted"}\n\n',
+      ]),
+    )
+    await p
+    expect(store.reconnecting).toBe(false)
+    expect(store.messages[1].content).toBe('前半后半') // 去重:"前半"只一次
+    expect(store.messages[1].streaming).toBe(false)
+    expect(sessionStorage.getItem('resumeagent.draft')).toBeNull() // done 清草稿
+    expect(String(fetchMock.mock.calls.at(-1)?.[0])).toContain('/api/chat/s1/stream?after=1')
+  })
+
+  it('send: 重连遇 404(缓冲过期)→ 降级错误提示 + 保全草稿,不重发', async () => {
+    const fetchMock = stubFetch((url) => {
+      if (url === '/api/chat') {
+        return Promise.resolve(
+          sseDropResponse([
+            'id: 0\nevent: conversation\ndata: {"conversation_id":7,"stream_id":"s2"}\n\n',
+            'id: 1\nevent: token\ndata: {"text":"已生成半截"}\n\n',
+          ]),
+        )
+      }
+      return Promise.resolve(sseResponse([], { ok: false, status: 404 }))
+    })
+    const store = useChatStore()
+    await store.send('问题')
+    const msg = store.messages[1]
+    expect(msg.content).toBe('已生成半截') // 本地内容保留
+    expect(msg.error).toContain('过期') // 降级提示
+    expect(msg.streaming).toBe(false)
+    expect(store.streaming).toBe(false)
+    expect(store.reconnecting).toBe(false)
+    // finally 补写完整草稿:刷新可恢复
+    const draft = JSON.parse(sessionStorage.getItem('resumeagent.draft')!)
+    expect(draft.content).toBe('已生成半截')
+    expect(draft.prompt).toBe('问题')
+    expect(fetchMock).toHaveBeenCalledTimes(2) // POST + 一次 GET(404 后停,不重发)
+  })
+
+  it('出错帧中断:finally 补写完整草稿(不因节流丢尾巴)', async () => {
+    stubFetch(async () =>
+      sseResponse([
+        'event: conversation\ndata: {"conversation_id":3,"stream_id":"s3"}\n\n',
+        'event: token\ndata: {"text":"部分"}\n\n',
+        'event: token\ndata: {"text":"内容"}\n\n',
+        'event: error\ndata: {"message":"后端炸了"}\n\n',
+      ]),
+    )
+    const store = useChatStore()
+    await store.send('问题')
+    expect(store.messages[1].error).toBe('后端炸了')
+    // 节流下第二个 token 不会单独写入,但 finally 补写保证草稿完整
+    const draft = JSON.parse(sessionStorage.getItem('resumeagent.draft')!)
+    expect(draft.content).toBe('部分内容')
   })
 })
