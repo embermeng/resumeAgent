@@ -2,12 +2,19 @@
 import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
+import AppSidebar from '@/components/AppSidebar.vue'
 
+/**
+ * 应用外壳(参考企业级 AI 助手布局):
+ * - 顶栏:粉彩渐变 + 品牌标识 + 用户菜单
+ * - 左侧:AppSidebar(新对话/菜单/历史)
+ * - 主区:router-view
+ * 登录页(meta.public)不套壳,整屏交给 LoginView。
+ */
 const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
 
-// 登录页不显示顶部导航壳(整屏交给 LoginView)
 const isPublic = computed(() => route.meta.public === true)
 
 async function onLogout() {
@@ -20,22 +27,12 @@ async function onLogout() {
   <!-- 公开页(登录):不套导航壳 -->
   <router-view v-if="isPublic" />
 
-  <el-container v-else class="app-shell">
-    <el-header class="app-header" height="56px">
+  <div v-else class="app-shell">
+    <header class="app-topbar">
       <div class="brand">
-        <span class="brand-logo">📄</span>
-        <span class="brand-name">ResumeAgent</span>
+        <span class="brand-logo">AI</span>
+        <span class="brand-name">ResumeAgent 智能体</span>
       </div>
-      <el-menu
-        :default-active="route.path"
-        mode="horizontal"
-        router
-        class="nav-menu"
-        :ellipsis="false"
-      >
-        <el-menu-item index="/">智能对话</el-menu-item>
-        <el-menu-item index="/admin">知识库管理</el-menu-item>
-      </el-menu>
       <el-dropdown v-if="auth.isAuthenticated" trigger="click">
         <span class="user-chip">
           <span class="user-avatar">{{ auth.user?.username?.charAt(0)?.toUpperCase() }}</span>
@@ -48,73 +45,91 @@ async function onLogout() {
           </el-dropdown-menu>
         </template>
       </el-dropdown>
-    </el-header>
-    <el-main class="app-main">
-      <router-view />
-    </el-main>
-  </el-container>
+    </header>
+    <div class="app-body">
+      <AppSidebar />
+      <main class="app-main">
+        <router-view />
+      </main>
+    </div>
+  </div>
 </template>
 
 <style scoped>
 .app-shell {
+  display: flex;
+  flex-direction: column;
   height: 100vh;
 }
-.app-header {
+.app-topbar {
+  flex: 0 0 56px;
   display: flex;
   align-items: center;
-  gap: 24px;
-  border-bottom: 1px solid var(--el-border-color-lighter);
-  background-color: var(--el-bg-color);
-  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
+  justify-content: space-between;
+  padding: 0 16px;
+  background: var(--rp-topbar-bg);
   z-index: 10;
 }
 .brand {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   white-space: nowrap;
 }
 .brand-logo {
-  font-size: 20px;
-  filter: drop-shadow(0 2px 4px rgba(79, 70, 229, 0.3));
+  width: 32px;
+  height: 32px;
+  border-radius: 9px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  font-weight: 800;
+  color: #fff;
+  background: var(--rp-brand-gradient);
+  box-shadow: 0 2px 6px rgba(78, 110, 242, 0.35);
 }
 .brand-name {
   font-weight: 800;
-  font-size: 18px;
-  letter-spacing: -0.02em;
-  background: linear-gradient(135deg, var(--rp-brand-from), var(--rp-brand-to));
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
-}
-.nav-menu {
-  flex: 1;
-  border-bottom: none;
+  font-size: 17px;
+  letter-spacing: -0.01em;
+  color: #1f2937;
 }
 .user-chip {
   display: flex;
   align-items: center;
   gap: 8px;
+  padding: 4px 12px 4px 5px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.72);
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.08);
   cursor: pointer;
-  font-size: 14px;
+  font-size: 13px;
   color: var(--el-text-color-primary);
   white-space: nowrap;
   outline: none;
 }
 .user-avatar {
-  width: 28px;
-  height: 28px;
-  border-radius: 8px;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 700;
   color: #fff;
-  background: linear-gradient(135deg, var(--rp-brand-from), var(--rp-brand-to));
+  background: var(--rp-brand-gradient);
+}
+.app-body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
 }
 .app-main {
-  padding: 0;
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
+  background: var(--rp-page-bg);
 }
 </style>

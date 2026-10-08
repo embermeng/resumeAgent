@@ -35,6 +35,11 @@ COPY app_api.py main.py ./
 COPY src/ ./src/
 COPY --from=frontend /build/dist ./frontend/dist
 
+# 数据库迁移目录：内置后才能在容器内直接执行 alembic upgrade head
+# （alembic/env.py 会 import src.* 读取 DATABASE_URL，故必须与源码同在）
+COPY alembic.ini ./
+COPY alembic/ ./alembic/
+
 # 知识库数据：只打包「索引产物 + 文档素材」，不打包课程 PDF（约 98MB，云端不解析）
 # 若 data 目录尚未构建，请先在本地执行 python main.py build-all，或删除下面三行改为挂载卷
 COPY data/processed ./data/processed

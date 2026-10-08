@@ -153,6 +153,7 @@ class AuthConfig:
     access_token_expire_minutes: int = 60
     refresh_token_expire_minutes: int = 7 * 24 * 60
     cookie_secure: bool = False
+    allow_register: bool = False
 
 
 @dataclass

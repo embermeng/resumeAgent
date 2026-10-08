@@ -5,7 +5,6 @@ import ElementPlus from 'element-plus'
 import ChatView from './ChatView.vue'
 import ChatMessage from '@/components/ChatMessage.vue'
 import ResumeUploader from '@/components/ResumeUploader.vue'
-import ConversationHistory from '@/components/ConversationHistory.vue'
 import { useChatStore } from '@/stores/chat'
 import * as api from '@/api/client'
 
@@ -85,14 +84,5 @@ describe('ChatView', () => {
     const w = await factory()
     expect(w.find('[data-test="stop-btn"]').exists()).toBe(true)
     expect(w.find('[data-test="send-btn"]').exists()).toBe(false)
-  })
-
-  it('点击历史按钮打开抽屉并挂载历史面板', async () => {
-    vi.mocked(api.getConversations).mockResolvedValue({ conversations: [], total: 0 })
-    const w = await factory()
-    expect(w.findComponent(ConversationHistory).exists()).toBe(false)
-    await w.find('[data-test="history-btn"]').trigger('click')
-    await flushPromises()
-    expect(w.findComponent(ConversationHistory).exists()).toBe(true)
   })
 })

@@ -2,12 +2,12 @@
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { ElMessage } from 'element-plus'
+import { Top } from '@element-plus/icons-vue'
 import { useChatStore } from '@/stores/chat'
 import * as api from '@/api/client'
 import { renderMarkdown } from '@/utils/markdown'
 import ChatMessage from '@/components/ChatMessage.vue'
 import ResumeUploader from '@/components/ResumeUploader.vue'
-import ConversationHistory from '@/components/ConversationHistory.vue'
 
 const store = useChatStore()
 const { messages, streaming, reconnecting, existingResume, recoverableDraft } = storeToRefs(store)
@@ -18,7 +18,6 @@ const extensions = ref<string[]>(['.md', '.txt', '.docx', '.pdf'])
 const previewVisible = ref(false)
 const previewContent = ref('')
 const previewHtml = computed(() => renderMarkdown(previewContent.value))
-const historyVisible = ref(false)
 
 // 空状态引导:点击示例问题直接填入输入框
 const SUGGESTIONS = [
@@ -89,87 +88,106 @@ function onDownload(markdown: string) {
 <template>
   <div class="chat-view">
     <section class="chat-main">
-      <!-- 断线/刷新后的内容保全恢复横幅 -->
-      <div v-if="recoverableDraft" class="recover-bar" data-test="recover-bar">
-        <span class="recover-text">检测到上次未完成的生成内容({{ recoverableDraft.content.length }} 字),是否恢复?</span>
-        <div class="recover-actions">
-          <el-button size="small" type="primary" data-test="recover-yes" @click="store.restoreDraft()">恢复</el-button>
-          <el-button size="small" text data-test="recover-no" @click="store.discardDraft()">丢弃</el-button>
-        </div>
-      </div>
-
-      <!-- 断线自动重连进行中提示(区别于正常流式) -->
-      <div v-if="reconnecting" class="reconnect-bar" data-test="reconnect-bar">
-        <span class="reconnect-text">连接中断,正在恢复…</span>
-      </div>
-
-      <div ref="scroller" class="messages" data-test="messages">
-        <div v-if="!messages.length" class="hero">
-          <div class="hero-logo">📄</div>
-          <h2 class="hero-title">ResumeAgent</h2>
-          <p class="hero-sub">课程知识问答 · 项目素材组装 · 一键生成简历</p>
-          <div class="hero-suggests">
-            <button
-              v-for="s in SUGGESTIONS"
-              :key="s.text"
-              type="button"
-              class="suggest-card"
-              data-test="suggestion"
-              @click="input = s.text"
-            >
-              <span class="suggest-icon">{{ s.icon }}</span>
-              <span class="suggest-text">{{ s.text }}</span>
-            </button>
+      <div class="chat-column">
+        <!-- 断线/刷新后的内容保全恢复横幅 -->
+        <div v-if="recoverableDraft" class="recover-bar" data-test="recover-bar">
+          <span class="recover-text">检测到上次未完成的生成内容({{ recoverableDraft.content.length }} 字),是否恢复?</span>
+          <div class="recover-actions">
+            <el-button size="small" type="primary" data-test="recover-yes" @click="store.restoreDraft()">恢复</el-button>
+            <el-button size="small" text data-test="recover-no" @click="store.discardDraft()">丢弃</el-button>
           </div>
-          <p class="hero-hint">开始对话:提问课程知识,或粘贴 JD 让我生成简历</p>
         </div>
-        <ChatMessage
-          v-for="m in messages"
-          :key="m.id"
-          :message="m"
-          @preview="onPreview"
-          @download="onDownload"
-          @retry="onRetry"
-        />
+
+        <!-- 断线自动重连进行中提示(区别于正常流式) -->
+        <div v-if="reconnecting" class="reconnect-bar" data-test="reconnect-bar">
+          <span class="reconnect-text">连接中断,正在恢复…</span>
+        </div>
       </div>
 
-      <div class="composer">
-        <div v-if="existingResume" class="resume-chip">
-          <el-tag type="success" closable data-test="resume-chip" @close="store.clearExistingResume()">
-            已附加简历(深思路径将基于它增强生成)
-          </el-tag>
-        </div>
-        <div class="input-row">
-          <el-input
-            v-model="input"
-            type="textarea"
-            :rows="3"
-            resize="none"
-            data-test="chat-input"
-            placeholder="输入问题或岗位要求...(Enter 发送,Shift+Enter 换行)"
-            @keydown.enter.exact.prevent="onSend"
+      <!-- 滚动容器横跨整个主区,滚动条贴屏幕右侧;内容仍在居中窄栏内 -->
+      <div ref="scroller" class="messages" data-test="messages">
+        <div class="messages-inner">
+          <div v-if="!messages.length" class="hero">
+            <div class="welcome">
+              <div class="welcome-avatar">🤖</div>
+              <div class="welcome-bubble">
+                <p class="wb-title">欢迎使用 <b>ResumeAgent</b></p>
+                <p class="wb-sub">
+                  我已准备好协助你完成课程知识问答、项目素材组装与简历生成,
+                  可以点击下方示例,或直接开始对话。
+                </p>
+              </div>
+            </div>
+            <div class="hero-suggests">
+              <button
+                v-for="s in SUGGESTIONS"
+                :key="s.text"
+                type="button"
+                class="suggest-card"
+                data-test="suggestion"
+                @click="input = s.text"
+              >
+                <span class="suggest-icon">{{ s.icon }}</span>
+                <span class="suggest-text">{{ s.text }}</span>
+              </button>
+            </div>
+            <p class="hero-hint">开始对话:提问课程知识,或粘贴 JD 让我生成简历</p>
+          </div>
+          <ChatMessage
+            v-for="m in messages"
+            :key="m.id"
+            :message="m"
+            @preview="onPreview"
+            @download="onDownload"
+            @retry="onRetry"
           />
-          <div class="btns">
-            <el-button
-              v-if="!streaming"
-              type="primary"
-              class="send-btn"
-              data-test="send-btn"
-              :disabled="!input.trim()"
-              @click="onSend"
-            >
-              发送 ↑
-            </el-button>
-            <el-button v-else type="danger" class="send-btn" data-test="stop-btn" @click="store.stop()">
-              停止 ■
-            </el-button>
-            <div class="btn-row">
-              <el-button text size="small" data-test="clear-btn" :disabled="!messages.length" @click="store.clear()">
-                清空
-              </el-button>
-              <el-button text size="small" data-test="history-btn" @click="historyVisible = true">
-                历史
-              </el-button>
+        </div>
+      </div>
+
+      <div class="chat-column">
+        <div class="composer">
+          <div v-if="existingResume" class="resume-chip">
+            <el-tag type="success" closable data-test="resume-chip" @close="store.clearExistingResume()">
+              已附加简历(深思路径将基于它增强生成)
+            </el-tag>
+          </div>
+          <div class="composer-box">
+            <el-input
+              v-model="input"
+              type="textarea"
+              :rows="3"
+              resize="none"
+              data-test="chat-input"
+              placeholder="输入问题或岗位要求...(Enter 发送,Shift+Enter 换行)"
+              @keydown.enter.exact.prevent="onSend"
+            />
+            <div class="composer-foot">
+              <div class="foot-left">
+                <el-button text size="small" data-test="clear-btn" :disabled="!messages.length" @click="store.clear()">
+                  清空
+                </el-button>
+              </div>
+              <button
+                v-if="!streaming"
+                type="button"
+                class="send-circle"
+                data-test="send-btn"
+                :disabled="!input.trim()"
+                title="发送(Enter)"
+                @click="onSend"
+              >
+                <el-icon><Top /></el-icon>
+              </button>
+              <button
+                v-else
+                type="button"
+                class="send-circle is-stop"
+                data-test="stop-btn"
+                title="停止生成"
+                @click="store.stop()"
+              >
+                <span class="stop-square" />
+              </button>
             </div>
           </div>
         </div>
@@ -189,45 +207,39 @@ function onDownload(markdown: string) {
         <el-button type="primary" @click="onDownload(previewContent)">下载 Markdown</el-button>
       </template>
     </el-dialog>
-
-    <!-- 历史会话抽屉;teleported=false 保持 DOM 在组件树内,便于测试定位 -->
-    <el-drawer
-      v-model="historyVisible"
-      title="历史会话"
-      direction="ltr"
-      size="320px"
-      :teleported="false"
-    >
-      <ConversationHistory @opened="historyVisible = false" />
-    </el-drawer>
   </div>
 </template>
 
 <style scoped>
 .chat-view {
+  position: relative;
   display: flex;
   height: 100%;
-  gap: 16px;
   padding: 16px;
 }
+/* 主区右侧为悬浮的简历卡片预留空间(300px 遮挡带) */
 .chat-main {
   flex: 1;
+  min-width: 0;
   display: flex;
   flex-direction: column;
-  min-width: 0;
-  border: 1px solid var(--el-border-color-lighter);
-  border-radius: 14px;
-  background: var(--el-bg-color);
-  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.05);
-  overflow: hidden;
+  padding-right: 300px;
+}
+/* 居中对话窄栏:参考企业级助手的阅读体验 */
+.chat-column {
+  flex-shrink: 0;
+  width: min(920px, 100%);
+  margin: 0 auto;
 }
 .recover-bar {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 8px 16px;
+  margin-bottom: 8px;
+  padding: 8px 14px;
+  border-radius: 10px;
   background: var(--el-color-warning-light-9);
-  border-bottom: 1px solid var(--el-color-warning-light-7);
+  border: 1px solid var(--el-color-warning-light-7);
   font-size: 13px;
   color: var(--el-text-color-primary);
 }
@@ -243,50 +255,76 @@ function onDownload(markdown: string) {
 .reconnect-bar {
   display: flex;
   align-items: center;
-  padding: 6px 16px;
+  margin-bottom: 8px;
+  padding: 6px 14px;
+  border-radius: 10px;
   background: var(--el-color-primary-light-9);
-  border-bottom: 1px solid var(--el-color-primary-light-7);
+  border: 1px solid var(--el-color-primary-light-7);
   font-size: 13px;
   color: var(--el-color-primary);
 }
 .messages {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
-  padding: 12px 0;
+  /* 负 margin 抵消 chat-main 的右侧预留,让滚动条贴到屏幕右边;
+     再用同宽 padding 把内容挡回预留带之外 */
+  margin-right: -300px;
+  padding: 8px 300px 16px 0;
   scroll-behavior: smooth;
 }
-/* 空状态 hero */
+.messages-inner {
+  width: min(920px, 100%);
+  margin: 0 auto;
+}
+/* 空状态:渐变欢迎横幅 + 示例卡片 */
 .hero {
-  height: 100%;
   display: flex;
   flex-direction: column;
+  gap: 20px;
+  padding: 6vh 0 24px;
+}
+.welcome {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+.welcome-avatar {
+  flex: 0 0 44px;
+  height: 44px;
+  border-radius: 12px;
+  display: flex;
   align-items: center;
   justify-content: center;
-  gap: 6px;
-  padding: 24px;
-}
-.hero-logo {
-  font-size: 44px;
-  filter: drop-shadow(0 4px 10px rgba(79, 70, 229, 0.25));
-}
-.hero-title {
-  margin: 4px 0 0;
   font-size: 22px;
-  background: linear-gradient(135deg, var(--rp-brand-from), var(--rp-brand-to));
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
+  background: #101426;
+  box-shadow: 0 4px 10px rgba(16, 20, 38, 0.35);
 }
-.hero-sub {
-  margin: 0 0 18px;
+.welcome-bubble {
+  flex: 1;
+  background: var(--rp-brand-gradient);
+  color: #fff;
+  border-radius: 8px 24px 24px 24px;
+  padding: 14px 20px;
+  box-shadow: 0 6px 16px rgba(78, 110, 242, 0.25);
+}
+.wb-title {
+  margin: 0 0 6px;
+  font-size: 14px;
+}
+.wb-title b {
+  font-size: 16px;
+}
+.wb-sub {
+  margin: 0;
   font-size: 13px;
-  color: var(--el-text-color-secondary);
+  line-height: 1.8;
+  opacity: 0.95;
 }
 .hero-suggests {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  width: min(460px, 100%);
 }
 .suggest-card {
   display: flex;
@@ -308,55 +346,84 @@ function onDownload(markdown: string) {
   transform: translateX(2px);
 }
 .hero-hint {
-  margin: 16px 0 0;
+  margin: 0;
   font-size: 12px;
   color: var(--el-text-color-placeholder);
+  text-align: center;
 }
+/* 卡片式输入区:白底圆角阴影,圆形发送按钮 */
 .composer {
-  border-top: 1px solid var(--el-border-color-lighter);
-  padding: 12px 16px;
-  background: var(--el-bg-color);
+  padding-top: 4px;
 }
 .resume-chip {
   margin-bottom: 8px;
 }
-.input-row {
+.composer-box {
+  background: var(--el-bg-color);
+  border-radius: 12px;
+  box-shadow: 0 4px 13px rgba(15, 23, 42, 0.08);
+  padding: 12px 14px 10px;
+}
+.composer-box :deep(.el-textarea__inner) {
+  border: none;
+  box-shadow: none;
+  background: transparent;
+  padding: 4px 2px;
+}
+.composer-foot {
   display: flex;
-  gap: 10px;
-  align-items: flex-end;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 6px;
 }
-.input-row :deep(.el-textarea__inner) {
-  border-radius: 10px;
-  padding: 10px 12px;
-  box-shadow: 0 0 0 1px var(--el-border-color) inset;
-  transition: box-shadow 0.2s;
-}
-.input-row :deep(.el-textarea__inner:focus) {
-  box-shadow: 0 0 0 1px var(--el-color-primary) inset;
-}
-.btns {
+.foot-left {
   display: flex;
-  flex-direction: column;
-  gap: 6px;
+  align-items: center;
+  gap: 4px;
 }
-.send-btn {
-  border-radius: 10px;
-  font-weight: 600;
+.send-circle {
+  width: 36px;
+  height: 36px;
+  border: none;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--rp-brand-gradient);
+  color: #fff;
+  font-size: 16px;
+  cursor: pointer;
+  box-shadow: 0 3px 8px rgba(78, 110, 242, 0.35);
+  transition: transform 0.15s, opacity 0.15s;
 }
-.btn-row {
-  display: flex;
-  gap: 2px;
-  justify-content: flex-end;
+.send-circle:hover:not(:disabled) {
+  transform: scale(1.06);
 }
+.send-circle:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+.send-circle.is-stop {
+  background: var(--el-color-danger);
+  box-shadow: 0 3px 8px rgba(245, 108, 108, 0.35);
+}
+.stop-square {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  background: #fff;
+}
+/* 右侧简历卡片:绝对定位悬浮,不占用滚动容器宽度 */
 .chat-side {
-  flex: 0 0 280px;
+  position: absolute;
+  right: 28px;
+  top: 16px;
   width: 280px;
-  border: 1px solid var(--el-border-color-lighter);
-  border-radius: 14px;
+  border-radius: 12px;
   padding: 16px;
   background: var(--el-bg-color);
-  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.05);
-  align-self: flex-start;
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.06);
 }
 .side-title {
   margin: 0 0 12px;

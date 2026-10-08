@@ -53,7 +53,6 @@ const showFooter = computed(
 
 <template>
   <div class="chat-message" :class="isUser ? 'is-user' : 'is-assistant'">
-    <div class="avatar">{{ isUser ? '我' : 'AI' }}</div>
     <div class="bubble">
       <div v-if="intentText" class="meta-row">
         <el-tag size="small" :type="isUser ? 'info' : 'primary'" effect="light" round class="intent-tag">
@@ -118,48 +117,25 @@ const showFooter = computed(
 <style scoped>
 .chat-message {
   display: flex;
-  gap: 12px;
-  padding: 10px 20px;
+  padding: 6px 0;
 }
 .chat-message.is-user {
-  flex-direction: row-reverse;
+  justify-content: flex-end;
 }
-.avatar {
-  flex: 0 0 36px;
-  width: 36px;
-  height: 36px;
-  border-radius: 10px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 13px;
-  font-weight: 600;
-  color: #fff;
-  background: linear-gradient(135deg, var(--rp-brand-from), var(--rp-brand-to));
-  box-shadow: 0 2px 8px rgba(79, 70, 229, 0.25);
-}
-.is-user .avatar {
-  background: linear-gradient(135deg, #64748b, #475569);
-  box-shadow: 0 2px 8px rgba(71, 85, 105, 0.25);
-}
+/* 气泡:AI 白底阴影、用户浅紫,圆角参考企业级助手(对角小圆角) */
 .bubble {
-  max-width: 78%;
-  padding: 12px 16px;
-  border-radius: 14px;
+  max-width: 85%;
+  padding: 12px 18px;
+  border-radius: 8px 24px 24px 24px;
   background: var(--el-bg-color);
-  border: 1px solid var(--el-border-color-lighter);
-  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.06);
+  box-shadow: 0 4px 10px rgba(15, 23, 42, 0.07);
   line-height: 1.7;
   word-break: break-word;
 }
 .is-user .bubble {
-  background: linear-gradient(135deg, var(--rp-brand-from), var(--rp-brand-to));
-  border: none;
-  color: #fff;
-  border-radius: 14px 4px 14px 14px;
-}
-.is-assistant .bubble {
-  border-radius: 4px 14px 14px 14px;
+  background: rgba(78, 110, 242, 0.14);
+  color: var(--el-text-color-primary);
+  border-radius: 24px 8px 24px 24px;
 }
 .meta-row {
   display: flex;

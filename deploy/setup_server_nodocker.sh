@@ -14,6 +14,10 @@
 #   DOMAIN       域名或公网 IP；填域名时自动申请证书
 #   ENABLE_AUTH  设为 1 时开启 Nginx 访问口令（账号 admin，执行中交互输入密码）
 #   SKIP_FRONTEND_BUILD=1  已自行上传 frontend/dist 时跳过前端构建
+#   SKIP_MIGRATIONS=1      跳过 alembic upgrade head（数据库已自行迁移时用）
+#
+# 前置条件：.env 中除 *_API_KEY 外，还必须配置 SECRET_KEY（JWT 鉴权，空值启动即报错）
+#           与 DATABASE_URL（PostgreSQL 连接串；本机部署可 sudo apt install -y postgresql）
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
@@ -21,6 +25,7 @@ APP_DIR="${APP_DIR:-/opt/ResumeAgent}"
 DOMAIN="${DOMAIN:-}"
 ENABLE_AUTH="${ENABLE_AUTH:-0}"
 SKIP_FRONTEND_BUILD="${SKIP_FRONTEND_BUILD:-0}"
+SKIP_MIGRATIONS="${SKIP_MIGRATIONS:-0}"
 VENV="$APP_DIR/.venv"
 PIP_INDEX="https://mirrors.cloud.tencent.com/pypi/simple"
 
@@ -41,6 +46,14 @@ if [ ! -f "$APP_DIR/.env" ]; then
 fi
 grep -qE "^(DASHSCOPE|OPENAI|GEMINI)_API_KEY=[[:print:]]+" "$APP_DIR/.env" \
     || die ".env 中未填写任何 *_API_KEY"
+
+# 多用户鉴权与数据库：两者缺失都会在启动时直接崩（src/config.py 对 SECRET_KEY 是硬校验）
+grep -qE "^SECRET_KEY=[[:print:]]+$" "$APP_DIR/.env" \
+    || die ".env 未设置 SECRET_KEY（JWT 鉴权必需，留空会 RuntimeError: SECRET_KEY not set）"
+grep -qE "^DATABASE_URL=[[:print:]]+$" "$APP_DIR/.env" \
+    || die ".env 未设置 DATABASE_URL（PostgreSQL 连接串；本机可 sudo apt install -y postgresql 后自建库）"
+grep -qE "^DATABASE_URL=.*(username:password|table_name)" "$APP_DIR/.env" \
+    && die ".env 的 DATABASE_URL 仍是 .env.example 的占位值，请改成真实连接串"
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
@@ -76,6 +89,16 @@ fi
 log "安装后端依赖（约 3~8 分钟）"
 "$VENV/bin/pip" install --upgrade pip -i "$PIP_INDEX"
 "$VENV/bin/pip" install -r requirements-prod.txt -i "$PIP_INDEX"
+
+# ------------------------------------------------------------ 2.5 数据库迁移
+# 必须在启动服务前建表；alembic/env.py 通过 src.config 读取 .env 的 DATABASE_URL
+if [ "$SKIP_MIGRATIONS" = "1" ]; then
+    warn "SKIP_MIGRATIONS=1，跳过数据库迁移"
+else
+    log "执行数据库迁移：alembic upgrade head"
+    (cd "$APP_DIR" && "$VENV/bin/alembic" upgrade head) \
+        || die "迁移失败：请检查 .env 的 DATABASE_URL 与数据库是否可达（本机：systemctl status postgresql）"
+fi
 
 # ---------------------------------------------------------------- 3. systemd 服务
 log "注册 systemd 服务（API + 两个 celery worker）"
@@ -191,3 +214,4 @@ fi
 echo "  查看日志：journalctl -u resume-agent -f（API）/ -u resume-agent-worker-resume -f（解析 worker）"
 echo "  重启服务：systemctl restart resume-agent resume-agent-worker-resume resume-agent-worker-knowledge"
 echo "  停止服务：systemctl stop resume-agent resume-agent-worker-resume resume-agent-worker-knowledge"
+echo "  重跑迁移：cd $APP_DIR && .venv/bin/alembic upgrade head"

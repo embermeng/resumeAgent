@@ -29,6 +29,12 @@ settings = get_config()
     status_code=status.HTTP_201_CREATED,
 )
 async def create_user(user: UserCreate, db: Annotated[AsyncSession, Depends(get_async_session)]):
+    if not settings.auth.allow_register:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Register is not allowed",
+        )
+
     result = await db.execute(
         select(models.User).where(
             func.lower(models.User.username) == user.username.lower(),

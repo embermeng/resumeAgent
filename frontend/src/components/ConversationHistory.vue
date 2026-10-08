@@ -88,8 +88,7 @@ function fmtTime(epoch: number): string {
 .history-panel {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  min-height: 200px;
+  gap: 6px;
 }
 .history-list {
   margin: 0;
@@ -100,17 +99,20 @@ function fmtTime(epoch: number): string {
   display: flex;
   justify-content: space-between;
   gap: 8px;
-  padding: 9px 12px;
+  padding: 8px 10px;
   border-radius: 8px;
   cursor: pointer;
-  transition: background 0.15s, box-shadow 0.15s;
+  transition: background 0.15s, color 0.15s;
 }
 .history-item:hover {
-  background: var(--el-fill-color-light);
+  background: rgba(0, 0, 0, 0.04);
 }
 .history-item.active {
-  background: var(--el-color-primary-light-9);
-  box-shadow: inset 3px 0 0 var(--el-color-primary);
+  background: rgba(78, 110, 242, 0.15);
+  color: var(--rp-brand-solid);
+}
+.history-item.active .time {
+  color: var(--rp-brand-solid);
 }
 .history-item .title {
   flex: 1;

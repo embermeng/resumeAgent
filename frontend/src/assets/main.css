@@ -5,23 +5,29 @@
    ========================================================================== */
 
 :root {
-  /* 品牌色:靛蓝 → 紫渐变,用于头像/hero/强调 */
-  --rp-brand-from: #6366f1;
-  --rp-brand-to: #8b5cf6;
-  --rp-brand-solid: #4f46e5;
+  /* 品牌色:蓝 → 紫渐变(对齐企业级参考视觉),用于头像/hero/强调 */
+  --rp-brand-from: #4e6ef2;
+  --rp-brand-to: #9f66ff;
+  --rp-brand-solid: #4e6ef2;
 
-  /* 覆盖 Element Plus 主色为一套现代靛蓝(light 变体手工给出,避免依赖 mix) */
-  --el-color-primary: #4f46e5;
-  --el-color-primary-light-3: #7c75eb;
-  --el-color-primary-light-5: #a5a0f2;
-  --el-color-primary-light-7: #cdc9f8;
-  --el-color-primary-light-8: #e0ddfb;
-  --el-color-primary-light-9: #eeecfd;
-  --el-color-primary-dark-2: #3f38b7;
+  /* 覆盖 Element Plus 主色为同系蓝紫(light 变体手工给出,避免依赖 mix) */
+  --el-color-primary: #4e6ef2;
+  --el-color-primary-light-3: #839af6;
+  --el-color-primary-light-5: #a7b7f9;
+  --el-color-primary-light-7: #cad4fb;
+  --el-color-primary-light-8: #dce2fc;
+  --el-color-primary-light-9: #edf1fe;
+  --el-color-primary-dark-2: #3e58c2;
 
   /* 圆角与页面底色 */
   --el-border-radius-base: 8px;
-  --rp-page-bg: #f6f7f9;
+  --rp-page-bg: #f5f6fa;
+  /* 侧边栏底色(略深于主区,形成层次) */
+  --rp-sidebar-bg: #f3f5f6;
+  /* 顶栏粉彩渐变(青 → 蓝紫 → 粉) */
+  --rp-topbar-bg: linear-gradient(90deg, #dff3f8 0%, #e7eafc 55%, #f6ebfa 100%);
+  /* 品牌实色渐变(按钮/气泡/头像) */
+  --rp-brand-gradient: linear-gradient(90deg, #4e6ef2 0%, #9f66ff 100%);
 
   color-scheme: light;
 }

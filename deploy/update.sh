@@ -11,17 +11,20 @@
 # 可选环境变量：
 #   APP_DIR              代码目录，默认 /opt/ResumeAgent
 #   SKIP_FRONTEND_BUILD=1 已自行上传 frontend/dist 时跳过前端构建
+#   SKIP_MIGRATIONS=1    跳过 alembic upgrade head
 #
 # 说明：
 #   - 自动识别当前是 Docker 模式还是 systemd（免 Docker）模式
 #   - Docker 模式：前端产物与 data 都内嵌在镜像里，任何更新都需 --build 重建
 #   - systemd 模式：dist 与 data 都在宿主机，改完重启进程即可
+#   - backend / all 会在重启后执行 alembic upgrade head（ORM 变更需先跑迁移再重启才完全生效）
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
 APP_DIR="${APP_DIR:-/opt/ResumeAgent}"
 TARGET="${1:-all}"
 SKIP_FRONTEND_BUILD="${SKIP_FRONTEND_BUILD:-0}"
+SKIP_MIGRATIONS="${SKIP_MIGRATIONS:-0}"
 VENV="$APP_DIR/.venv"
 PIP_INDEX="https://mirrors.cloud.tencent.com/pypi/simple"
 
@@ -73,6 +76,27 @@ restart_workers() {
     done
 }
 
+run_migrations() {
+    if [ "$SKIP_MIGRATIONS" = "1" ]; then
+        warn "SKIP_MIGRATIONS=1，跳过数据库迁移"
+        return
+    fi
+    if [ ! -f "$APP_DIR/alembic.ini" ]; then
+        warn "未找到 alembic.ini（旧版本发布包？），跳过迁移；建议重新打包发布"
+        return
+    fi
+    if [ "$MODE" = "systemd" ]; then
+        log "执行数据库迁移：alembic upgrade head"
+        (cd "$APP_DIR" && "$VENV/bin/alembic" upgrade head) \
+            || die "迁移失败：检查 .env 的 DATABASE_URL 与数据库可达性"
+    else
+        # 镜像已内置 alembic.ini / alembic/，用一次性容器跑迁移（--no-deps 不拉起 redis）
+        log "执行数据库迁移：容器内 alembic upgrade head"
+        (cd "$APP_DIR" && docker compose run --rm -T --no-deps resume-agent alembic upgrade head) \
+            || die "迁移失败：检查 .env 的 DATABASE_URL 与数据库可达性"
+    fi
+}
+
 restart_service() {
     if [ "$MODE" = "systemd" ]; then
         log "安装/更新后端依赖"
@@ -103,6 +127,7 @@ case "$TARGET" in
         ;;
     backend)
         restart_service
+        run_migrations
         ;;
     data)
         if [ "$MODE" = "docker" ]; then
@@ -121,6 +146,7 @@ case "$TARGET" in
     all)
         build_frontend
         restart_service
+        run_migrations
         ;;
     *)
         die "未知参数 $TARGET（可选：backend | frontend | data | all）"
