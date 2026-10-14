@@ -54,6 +54,8 @@ services:
       DATABASE_URL: postgresql+psycopg://resume:resume@db:5432/resumeagent
       SERVE_STATIC: "0"
       CORS_ORIGINS: "*"
+      # 开发环境放开注册（代码默认 false）；生产由服务器 .env 决定，不在此覆盖
+      ALLOW_REGISTER: "true"
       TZ: Asia/Shanghai
       REDIS_URL: redis://redis:6379/0
     volumes:
@@ -66,7 +68,10 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    command: uvicorn app_api:app --host 0.0.0.0 --port 8000 --reload
+    # --timeout-graceful-shutdown:改文件触发热重载时,最多等 5s 就掐断在途的 SSE 长连接。
+    # 不加的话前端那些任务进度流/对话流不断开,旧进程会一直停在 "Shutting down",
+    # 新进程不接管,表现就是所有请求(含 /api/health)排队 pending。
+    command: uvicorn app_api:app --host 0.0.0.0 --port 8000 --reload --timeout-graceful-shutdown 5
   worker-resume:
     build:
       context: .
@@ -112,6 +117,28 @@ services:
       redis:
         condition: service_healthy
     command: celery -A src.worker.celery_app worker --loglevel=info -Q knowledge --concurrency=1
+  worker-project:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: resume-agent-worker-project-dev
+    # 项目文档入库消费者:只消费 project 队列。与 knowledge 分开是硬要求——
+    # 后者 concurrency=1 且跑 build-all(数分钟),上传排在后面不可接受。
+    # concurrency=2:单文档只写自身 {doc_id}.faiss/.pkl,文件间无冲突。
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://resume:resume@db:5432/resumeagent
+      REDIS_URL: redis://redis:6379/0
+      TZ: Asia/Shanghai
+    volumes:
+      - .:/app
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: celery -A src.worker.celery_app worker --loglevel=info -Q project --concurrency=2
 
 volumes:
   pgdata_dev:

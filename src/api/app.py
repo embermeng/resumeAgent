@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from src.api.routers import chat, knowledge, resume, conversations, auth
+from src.api.routers import chat, knowledge, resume, project, conversations, auth
 
 _log = logging.getLogger(__name__)
 
@@ -83,6 +83,7 @@ def create_app() -> FastAPI:
 
     app.include_router(chat.router, prefix="/api", tags=["chat"])
     app.include_router(resume.router, prefix="/api", tags=["resume"])
+    app.include_router(project.router, prefix="/api", tags=["project"])
     app.include_router(knowledge.router, prefix="/api", tags=["knowledge"])
     app.include_router(conversations.router, prefix="/api", tags=["conversations"])
     app.include_router(auth.router, prefix="/api", tags=["auth"])

@@ -1,12 +1,20 @@
 import { defineStore } from 'pinia'
 import { useChatStream } from '@/composables/useChatStream'
-import { getConversationMessages, getConversations } from '@/api/client'
-import type { ChatEvent, ConversationSummary, Intent, MessageOut } from '@/types/events'
+import {
+  deleteConversation,
+  deleteResumeCurrent,
+  getConversationMessages,
+  getConversations,
+  getResumeCurrent,
+} from '@/api/client'
+import type { ChatEvent, ConversationSummary, Intent, MessageOut, ResumeCurrent } from '@/types/events'
 
 /** 当前标签页所属会话 id 的 sessionStorage 键(按标签页隔离,刷新可续接同一会话) */
 const CONVERSATION_KEY = 'resumeagent.conversation_id'
 /** 流式进行中草稿的 sessionStorage 键(刷新/断线后保全已生成内容) */
 const DRAFT_KEY = 'resumeagent.draft'
+/** 当前简历的 sessionStorage 键(同标签页刷新立即回显;跨标签页由 loadCurrentResume 从服务端取回) */
+const RESUME_KEY = 'resumeagent.existing_resume'
 
 /** 从 sessionStorage 读回会话 id(不可用/无值时返回 null) */
 function readConversationId(): number | null {
@@ -100,28 +108,85 @@ function removeDraft() {
   }
 }
 
+/**
+ * sessionStorage 里的简历快照(同标签页刷新的快路径)。
+ * 每个用户只有一份简历,所以这里存的就是"当前简历";
+ * 服务端才是权威,挂载后 loadCurrentResume 会用 GET /resume/current 覆盖它。
+ */
+export interface StoredResume {
+  filename: string
+  content: string
+  created_at: number
+}
+
+function readExistingResume(): StoredResume | null {
+  try {
+    const raw = sessionStorage.getItem(RESUME_KEY)
+    if (!raw) return null
+    const r = JSON.parse(raw) as StoredResume
+    return r && typeof r.content === 'string' && r.content ? r : null
+  } catch {
+    return null
+  }
+}
+
+function writeExistingResume(r: StoredResume) {
+  try {
+    sessionStorage.setItem(RESUME_KEY, JSON.stringify(r))
+  } catch {
+    /* 隐私模式或超出配额,忽略:下次刷新靠 loadCurrentResume 从服务端取回 */
+  }
+}
+
+function removeExistingResume() {
+  try {
+    sessionStorage.removeItem(RESUME_KEY)
+  } catch {
+    /* 忽略 */
+  }
+}
+
 export const useChatStore = defineStore('chat', {
-  state: () => ({
-    messages: [] as ChatMessage[],
-    /** 最新阶段提示(来自 status 事件) */
-    status: null as string | null,
-    /** 当前意图(来自 intent 事件) */
-    intent: null as Intent | null,
-    /** 已上传/暂存的简历 Markdown,随下一次 send 透传 */
-    existingResume: '',
-    streaming: false,
-    /** 断线重连进行中(「恢复中」):POST 流断线后自动 GET 续传期间为 true */
-    reconnecting: false,
-    /** 当前会话 id(来自 conversation 首帧;刷新后从 sessionStorage 续接) */
-    conversationId: readConversationId() as number | null,
-    /** 历史会话列表(drawer 面板数据源,updated_at 降序) */
-    history: [] as ConversationSummary[],
-    historyTotal: 0,
-    historyLoading: false,
-    /** 刷新后待恢复的流式草稿(内容保全,由 ChatView 展示恢复横幅) */
-    recoverableDraft: readDraft() as StreamDraft | null,
-  }),
+  state: () => {
+    const attached = readExistingResume()
+    return {
+      messages: [] as ChatMessage[],
+      /** 最新阶段提示(来自 status 事件) */
+      status: null as string | null,
+      /** 当前意图(来自 intent 事件) */
+      intent: null as Intent | null,
+      /** 当前简历的 Markdown,随下一次 send 透传;'' 表示没有简历 */
+      existingResume: attached?.content ?? '',
+      /** 简历文件名(上传卡片回显用) */
+      existingResumeName: attached?.filename ?? '',
+      /** 简历解析时间 epoch 秒(上传卡片回显用) */
+      existingResumeTime: attached?.created_at ?? null as number | null,
+      /**
+       * 本地简历变更计数。loadCurrentResume 在 await 前后比对它:
+       * 请求在途期间用户自己传了/删了简历,以用户操作为准,不被旧响应顶回。
+       */
+      resumeRev: 0,
+      streaming: false,
+      /** 断线重连进行中(「恢复中」):POST 流断线后自动 GET 续传期间为 true */
+      reconnecting: false,
+      /** 当前会话 id(来自 conversation 首帧;刷新后从 sessionStorage 续接) */
+      conversationId: readConversationId() as number | null,
+      /** 历史会话列表(drawer 面板数据源,updated_at 降序) */
+      history: [] as ConversationSummary[],
+      historyTotal: 0,
+      historyLoading: false,
+      /** 刷新后待恢复的流式草稿(内容保全,由 ChatView 展示恢复横幅) */
+      recoverableDraft: readDraft() as StreamDraft | null,
+    }
+  },
   getters: {
+    /**
+     * 是否已有简历。正文可能因产物文件丢失而为空,但元信息还在就得给删除入口,
+     * 所以判据取"文件名或正文任一非空"。
+     */
+    hasResume(state): boolean {
+      return state.existingResume !== '' || state.existingResumeName !== ''
+    },
     lastAssistant(state): ChatMessage | null {
       for (let i = state.messages.length - 1; i >= 0; i--) {
         if (state.messages[i].role === 'assistant') return state.messages[i]
@@ -130,11 +195,48 @@ export const useChatStore = defineStore('chat', {
     },
   },
   actions: {
-    setExistingResume(md: string) {
+    setExistingResume(md: string, filename = '', createdAt: number | null = null) {
       this.existingResume = md
+      this.existingResumeName = filename
+      this.existingResumeTime = createdAt
+      this.resumeRev += 1
+      if (md) writeExistingResume({ filename, content: md, created_at: createdAt ?? 0 })
+      else removeExistingResume()
     },
     clearExistingResume() {
-      this.existingResume = ''
+      this.setExistingResume('', '', null)
+    },
+    /**
+     * 从服务端取回"我的简历"并带入上下文(刷新/换标签页/重开浏览器后都适用)。
+     * 简历是每人在服务端的一份长期资产,不再有"取消附加"这一说:
+     * 有就用,没有(或已在别处删掉)就清。请求失败保留本地态,不打断对话。
+     */
+    async loadCurrentResume(): Promise<void> {
+      const rev = this.resumeRev
+      let r: ResumeCurrent | undefined
+      try {
+        r = await getResumeCurrent()
+      } catch {
+        return // 网络/权限异常:本地那份继续用,不误清
+      }
+      // 等待期间用户自己传了/删了简历,以用户操作为准
+      if (this.resumeRev !== rev) return
+      if (!r) {
+        this.clearExistingResume()
+        return
+      }
+      // content 为 null = 产物文件丢了:元信息照常回显,但不往上下文塞空串
+      this.setExistingResume(r.content ?? '', r.filename ?? '', r.created_at)
+    },
+    /** 删除我的简历(服务端连解析产物文件一并清除);返回是否成功 */
+    async removeResume(): Promise<boolean> {
+      try {
+        await deleteResumeCurrent()
+      } catch {
+        return false
+      }
+      this.clearExistingResume()
+      return true
     },
     clear() {
       this.messages = []
@@ -163,7 +265,7 @@ export const useChatStore = defineStore('chat', {
         /* 忽略 */
       }
     },
-    /** 拉取历史会话列表(契约 4.9);失败静默降级保留旧列表,不抛给调用方 */
+    /** 拉取历史会话列表(契约 4.11);失败静默降级保留旧列表,不抛给调用方 */
     async loadHistory(page = 1, pageSize = 20, append = false) {
       this.historyLoading = true
       try {
@@ -176,7 +278,7 @@ export const useChatStore = defineStore('chat', {
         this.historyLoading = false
       }
     },
-    /** 打开历史会话(契约 4.10):回填消息并切换当前会话,后续 send 续接该会话 */
+    /** 打开历史会话(契约 4.12):回填消息并切换当前会话,后续 send 续接该会话 */
     async openConversation(id: number) {
       // 流式期间不切会话,避免两条流交叉写消息列表
       if (this.streaming) return
@@ -196,6 +298,21 @@ export const useChatStore = defineStore('chat', {
       // 切会话后旧草稿不再属于当前上下文,丢弃避免恢复横幅误导
       this.recoverableDraft = null
       removeDraft()
+    },
+    /**
+     * 删除历史会话(契约 4.12b),后端连消息一起删。
+     * 删的正是当前会话时回到新会话态,下一条消息另起一个会话。
+     */
+    async removeConversation(id: number): Promise<boolean> {
+      try {
+        await deleteConversation(id)
+      } catch {
+        return false
+      }
+      this.history = this.history.filter((c) => c.id !== id)
+      if (this.historyTotal > 0) this.historyTotal -= 1
+      if (this.conversationId === id) this.clear()
+      return true
     },
     /** 把刷新前保全的草稿恢复为消息对(已生成内容不丢),并清除草稿 */
     restoreDraft() {

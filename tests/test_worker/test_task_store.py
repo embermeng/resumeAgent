@@ -6,6 +6,7 @@ task_store 测试:SQLite 文件库直测(monkeypatch 换掉模块内 SessionLoca
 - update 只写传入字段,finished_at float epoch → UTC datetime
 - 三个函数全部吞 DB 异常(沿用 TaskManager 时代行为:DB 抖动不炸任务/端点)
 - get_task 返回脱离 session 的实例,列属性仍可读(A-4 SSE 适配器依赖此行为)
+- purge_other_resumes 每人只留一份简历:只删本人 parse-resume 行,返回产物路径交调用方删文件
 """
 from datetime import UTC, datetime
 
@@ -119,3 +120,41 @@ class TestGetTask:
             raise RuntimeError("db down")
         monkeypatch.setattr(store, "SessionLocal", boom)
         assert store.get_task("t1") is None
+
+
+class TestPurgeOtherResumes:
+    """每用户只保留一份简历:新简历成功后清掉同一用户的其余 parse-resume 行。"""
+
+    def test_deletes_others_and_returns_paths(self, factory):
+        store.insert_task("t-keep", "parse-resume", 7, "new.pdf")
+        store.insert_task("t-old", "parse-resume", 7, "old.pdf")
+        store.insert_task("t-failed", "parse-resume", 7, "bad.pdf")
+        store.update_task("t-old", status="success", result_path="/tmp/old.md")
+        # 失败/pending 的旧行也要清掉,否则永远留在表里没人再看见
+        paths = store.purge_other_resumes(7, "t-keep")
+        assert paths == ["/tmp/old.md"]
+        assert _row(factory, "t-keep") is not None
+        assert _row(factory, "t-old") is None
+        assert _row(factory, "t-failed") is None
+
+    def test_keeps_other_users_and_knowledge_tasks(self, factory):
+        store.insert_task("t-mine-old", "parse-resume", 7, "a.pdf")
+        store.insert_task("t-other", "parse-resume", 8, "b.pdf")
+        store.insert_task("t-build", "build-all", 7, None)
+        assert store.purge_other_resumes(7, "t-mine-new") == []
+        assert _row(factory, "t-other") is not None
+        assert _row(factory, "t-build") is not None
+
+    def test_noop_when_no_other_rows(self, factory):
+        store.insert_task("t-keep", "parse-resume", 7, "a.pdf")
+        assert store.purge_other_resumes(7, "t-keep") == []
+        assert _row(factory, "t-keep") is not None
+
+    def test_db_error_swallowed_returns_empty(self, factory, monkeypatch):
+        store.insert_task("t-old", "parse-resume", 7, "a.pdf")
+
+        def boom():
+            raise RuntimeError("db down")
+        monkeypatch.setattr(store, "SessionLocal", boom)
+        # 清理失败不能炸任务:旧的留着(顶多下次再清),但绝不能返回假路径让人删文件
+        assert store.purge_other_resumes(7, "t-new") == []

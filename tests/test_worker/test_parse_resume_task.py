@@ -10,6 +10,7 @@
 - 所有写进 DB 的 status 必须在 TaskState 四态内(回归守卫:曾写 "failure" 破契约)
 - .upload 成功/失败两条路都在 finally 清理
 - 失败先落 DB 再裸 raise(backend 才能标 FAILURE)
+- 每人一份简历:成功回写后 purge 同用户旧行并删其产物;失败/无 user_id 一律不动旧的
 - task_routes 把两个具名任务路由到 resume/knowledge 队列 + acks_late
 """
 import json
@@ -88,9 +89,10 @@ class TestParseResumeTask:
         parser.parse.side_effect = ValueError("parse boom")
         with patch("src.knowledge.resume_file_parser.ResumeFileParser", return_value=parser), \
                 patch.object(parse_resume_task, "update_state"), \
-                patch.object(tasks_module, "update_task") as mock_db:
+                patch.object(tasks_module, "update_task") as mock_db, \
+                patch.object(tasks_module, "purge_other_resumes") as mock_purge:
             with pytest.raises(ValueError):
-                parse_resume_task(str(upload), "x.pdf")
+                parse_resume_task(str(upload), "x.pdf", 7)
 
         # 失败先落 DB(status 必须是契约值 "failed",不是 Celery 的 "FAILURE"/"failure")
         final = mock_db.call_args_list[-1].kwargs
@@ -100,3 +102,42 @@ class TestParseResumeTask:
         assert "finished_at" in final
         # 失败路径 finally 同样清理 .upload
         assert not upload.exists()
+        # 新简历没解析成功 → 旧的必须原样留着(否则传错文件就把简历弄丢了)
+        mock_purge.assert_not_called()
+
+
+class TestParseResumeSupersede:
+    """每人只保留一份简历:成功回写后由 worker 顶替掉同用户的旧简历。"""
+
+    def test_success_purges_previous_rows_and_files(self, task_env):
+        tmp_path, upload = task_env
+        stale = tmp_path / "stale.md"
+        stale.write_text("# 旧简历", encoding="utf-8")
+        gone = tmp_path / "already-gone.md"   # 产物已被外部清掉,unlink 要容错
+        parser = MagicMock()
+        parser.parse.return_value = "# 新简历"
+        with patch("src.knowledge.resume_file_parser.ResumeFileParser", return_value=parser), \
+                patch.object(parse_resume_task, "update_state"), \
+                patch.object(tasks_module, "update_task"), \
+                patch.object(tasks_module, "purge_other_resumes",
+                             return_value=[str(stale), str(gone)]) as mock_purge:
+            r = parse_resume_task.apply(args=(str(upload), "x.pdf", 7), task_id="t-new")
+
+        assert r.successful()
+        # 只认本次消息里带的 user_id,保留的正是当前 task
+        assert mock_purge.call_args.args == (7, "t-new")
+        assert not stale.exists()
+        assert not upload.exists()
+
+    def test_legacy_message_without_user_id_skips_purge(self, task_env):
+        """旧格式消息(只带路径+文件名)在队列里残留时,不能误删任何人的简历。"""
+        _, upload = task_env
+        parser = MagicMock()
+        parser.parse.return_value = "# 简历"
+        with patch("src.knowledge.resume_file_parser.ResumeFileParser", return_value=parser), \
+                patch.object(parse_resume_task, "update_state"), \
+                patch.object(tasks_module, "update_task"), \
+                patch.object(tasks_module, "purge_other_resumes") as mock_purge:
+            parse_resume_task(str(upload), "x.pdf")
+
+        mock_purge.assert_not_called()

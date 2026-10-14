@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import type { UploadRequestOptions } from 'element-plus'
 import { UploadFilled } from '@element-plus/icons-vue'
 import * as api from '@/api/client'
@@ -12,10 +12,13 @@ const props = withDefaults(
     /** 允许的扩展名白名单,默认取契约值 */
     extensions?: string[]
     disabled?: boolean
+    /** 当前是否已有简历:每人只保留一份,有则上传前先让用户确认替换 */
+    hasResume?: boolean
   }>(),
   {
     extensions: () => ['.md', '.txt', '.docx', '.pdf'],
     disabled: false,
+    hasResume: false,
   },
 )
 
@@ -86,15 +89,21 @@ async function pollUntilTerminal(
   return null
 }
 
+/**
+ * 终态文案以结果为准,不停留在最后一个 progress 帧:
+ * 任务很快时 SSE 常只送来首帧"排队中",不覆盖就会进度条 100% 而文字还写着排队中。
+ */
 function succeed(name: string, content: string): void {
   phase.value = 'success'
   percent.value = 100
+  statusMessage.value = '解析完成'
   emit('parsed', { filename: name, content })
   ElMessage.success(`已解析: ${name}`)
 }
 
 function fail(msg: string): void {
   phase.value = 'failed'
+  statusMessage.value = msg
   emit('error', msg)
   ElMessage.error(msg)
 }
@@ -127,15 +136,29 @@ function isSupported(name: string): boolean {
   return props.extensions.some((ext) => lower.endsWith(ext.toLowerCase()))
 }
 
-/** el-upload before-upload:不支持的扩展名直接拦截 */
-function beforeUpload(file: File): boolean {
+/**
+ * el-upload before-upload:扩展名不支持直接拦截;已有简历时先问一次要不要替换。
+ * 真正删旧的发生在后端"新简历解析成功之后",所以这里只是让用户有心理准备,
+ * 新文件解析失败时当前简历仍然留着。
+ */
+async function beforeUpload(file: File): Promise<boolean> {
   if (!isSupported(file.name)) {
     const msg = `不支持的文件格式: ${file.name}(仅支持 ${props.extensions.join(', ')})`
     emit('error', msg)
     ElMessage.error(msg)
     return false
   }
-  return true
+  if (!props.hasResume) return true
+  try {
+    await ElMessageBox.confirm(
+      '你已有一份简历,每人只保留一份:新简历解析成功后会替换它,旧的解析结果随之删除。确定继续?',
+      '替换确认',
+      { type: 'warning', confirmButtonText: '继续上传', cancelButtonText: '取消' },
+    )
+    return true
+  } catch {
+    return false // 用户取消:不提交任务,旧简历不动
+  }
 }
 
 /** el-upload 自定义上传:提交后台解析任务并订阅进度 */

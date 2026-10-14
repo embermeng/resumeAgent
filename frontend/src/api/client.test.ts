@@ -40,6 +40,36 @@ describe('api/client', () => {
     expect(fetchMock.mock.calls[0][0]).toBe('/api/resume/parse/a%2Fb')
   })
 
+  it('getResumeCurrent:GET /api/resume/current,返回当前简历与正文', async () => {
+    const fetchMock = stubFetch(async () =>
+      jsonResponse({ filename: 'a.md', created_at: 100, finished_at: 101, content: '# A' }),
+    )
+    const res = await client.getResumeCurrent()
+    expect(res).toEqual({ filename: 'a.md', created_at: 100, finished_at: 101, content: '# A' })
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/resume/current')
+  })
+
+  it('getResumeCurrent:204(没传过)解析为 undefined 而不是报错', async () => {
+    stubFetch(async () => jsonResponse(undefined, { status: 204 }))
+    await expect(client.getResumeCurrent()).resolves.toBeUndefined()
+  })
+
+  it('deleteResumeCurrent:DELETE /api/resume/current,204 无响应体不报错', async () => {
+    const fetchMock = stubFetch(async () => jsonResponse(undefined, { status: 204 }))
+    await expect(client.deleteResumeCurrent()).resolves.toBeUndefined()
+    const [url, opts] = fetchMock.mock.calls[0]
+    expect(url).toBe('/api/resume/current')
+    expect(opts?.method).toBe('DELETE')
+  })
+
+  it('deleteConversation:DELETE /api/conversations/{id},204 无响应体不报错', async () => {
+    const fetchMock = stubFetch(async () => jsonResponse(undefined, { status: 204 }))
+    await expect(client.deleteConversation(7)).resolves.toBeUndefined()
+    const [url, opts] = fetchMock.mock.calls[0]
+    expect(url).toBe('/api/conversations/7')
+    expect(opts?.method).toBe('DELETE')
+  })
+
   it('buildKnowledge:POST JSON,返回 task_id/status', async () => {
     const fetchMock = stubFetch(async () => jsonResponse({ task_id: 't1', status: 'pending' }, { status: 202 }))
     const res = await client.buildKnowledge({ task: 'build-all', force: true, chunk_size: 300 })

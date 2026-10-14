@@ -46,7 +46,7 @@ class TestPathConfig:
         pc = PathConfig(root_path=tmp_path)
         pc.ensure_dirs()
         assert pc.course_pdfs_dir.exists()
-        assert pc.project_highlights_dir.exists()
+        assert pc.projects_dir.exists()
         assert pc.course_chunks_dir.exists()
         assert pc.vector_dbs_dir.exists()
 

@@ -5,13 +5,13 @@
 # 适用：服务器无法访问 Docker Hub（docker pull 超时/被限）时，用 venv + systemd 直跑。
 #
 # 用法（代码已放到 /opt/ResumeAgent 后执行）：
-#   sudo bash deploy/setup_server_nodocker.sh
-#   sudo ENABLE_AUTH=1 bash deploy/setup_server_nodocker.sh   # 加访问口令（推荐）
-#   sudo DOMAIN=resume.example.com bash deploy/setup_server_nodocker.sh  # 有域名时配 HTTPS
+#   sudo bash deploy/setup_server_nodocker.sh                    # 用默认域名 resumeagent.icu + HTTPS
+#   sudo ENABLE_AUTH=1 bash deploy/setup_server_nodocker.sh      # 加访问口令（推荐）
+#   sudo DOMAIN= bash deploy/setup_server_nodocker.sh            # 显式留空 = 只用 IP，不申请证书
 #
 # 可选环境变量：
 #   APP_DIR      代码目录，默认 /opt/ResumeAgent
-#   DOMAIN       域名或公网 IP；填域名时自动申请证书
+#   DOMAIN       域名或公网 IP；填域名时自动申请证书，留空则只配 HTTP
 #   ENABLE_AUTH  设为 1 时开启 Nginx 访问口令（账号 admin，执行中交互输入密码）
 #   SKIP_FRONTEND_BUILD=1  已自行上传 frontend/dist 时跳过前端构建
 #   SKIP_MIGRATIONS=1      跳过 alembic upgrade head（数据库已自行迁移时用）
@@ -22,7 +22,8 @@
 set -euo pipefail
 
 APP_DIR="${APP_DIR:-/opt/ResumeAgent}"
-DOMAIN="${DOMAIN:-}"
+# 默认站点域名（腾讯云 DNSPod 已解析到本机）；换域名用 DOMAIN=xxx 覆盖，DOMAIN= 关掉 HTTPS
+DOMAIN="${DOMAIN-resumeagent.icu}"
 ENABLE_AUTH="${ENABLE_AUTH:-0}"
 SKIP_FRONTEND_BUILD="${SKIP_FRONTEND_BUILD:-0}"
 SKIP_MIGRATIONS="${SKIP_MIGRATIONS:-0}"
@@ -170,6 +171,8 @@ if ! command -v nginx >/dev/null 2>&1; then
     systemctl enable --now nginx
 fi
 
+is_ip() { [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; }
+
 if [ -z "$DOMAIN" ]; then
     SERVER_NAME="$(curl -fsS --max-time 5 ifconfig.me 2>/dev/null || echo '_')"
     warn "未设置 DOMAIN，站点名为 $SERVER_NAME（通过公网 IP 访问）"
@@ -177,7 +180,18 @@ else
     SERVER_NAME="$DOMAIN"
 fi
 
-sed "s/your-domain.com/$SERVER_NAME/" "$APP_DIR/deploy/nginx.conf" > /etc/nginx/conf.d/resume-agent.conf
+# www 子域只在「确实是域名 + DNS 里有记录」时才一起配，否则证书会连 www 一起签失败
+ALT_HOST=""
+if [ -n "$DOMAIN" ] && ! is_ip "$DOMAIN" && [[ "$DOMAIN" != www.* ]] && getent hosts "www.$DOMAIN" >/dev/null 2>&1; then
+    ALT_HOST="www.$DOMAIN"
+    log "检测到 www.$DOMAIN 已解析，server_name 与证书一并带上"
+fi
+
+# /g 是必需的：模板里 server_name 那行有裸域名和 www 两个占位符
+sed "s/your-domain.com/$SERVER_NAME/g" "$APP_DIR/deploy/nginx.conf" > /etc/nginx/conf.d/resume-agent.conf
+if [ -z "$ALT_HOST" ]; then
+    sed -i "s|^    server_name .*$|    server_name $SERVER_NAME;|" /etc/nginx/conf.d/resume-agent.conf
+fi
 
 if [ "$ENABLE_AUTH" = "1" ]; then
     log "开启访问口令"
@@ -196,20 +210,25 @@ systemctl reload nginx
 log "Nginx 已加载配置"
 
 # ---------------------------------------------------------------- 5. HTTPS
-if [ -n "$DOMAIN" ] && ! [[ "$DOMAIN" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-    log "为 $DOMAIN 申请 HTTPS 证书"
+if [ -n "$DOMAIN" ] && ! is_ip "$DOMAIN"; then
+    if [ -n "$ALT_HOST" ]; then
+        CERT_HOSTS=(-d "$DOMAIN" -d "$ALT_HOST")
+    else
+        CERT_HOSTS=(-d "$DOMAIN")
+    fi
+    log "为 ${CERT_HOSTS[*]} 申请 HTTPS 证书"
     command -v certbot >/dev/null 2>&1 || apt-get install -y certbot python3-certbot-nginx
-    certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos --register-unsafely-without-email \
-        || warn "证书申请失败，稍后可手动执行：certbot --nginx -d $DOMAIN"
+    certbot --nginx "${CERT_HOSTS[@]}" --non-interactive --agree-tos --register-unsafely-without-email \
+        || warn "证书申请失败，稍后可手动执行：certbot --nginx ${CERT_HOSTS[*]}"
 fi
 
 # ---------------------------------------------------------------- 6. 结果
 echo
 log "部署完成（免 Docker 模式）"
-if [ -n "$DOMAIN" ] && ! [[ "$DOMAIN" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+if [ -n "$DOMAIN" ] && ! is_ip "$DOMAIN"; then
     echo "  访问地址：https://$DOMAIN"
 else
-    echo "  访问地址：http://<你的公网IP>"
+    echo "  访问地址：http://$SERVER_NAME"
 fi
 echo "  查看日志：journalctl -u resume-agent -f（API）/ -u resume-agent-worker-resume -f（解析 worker）"
 echo "  重启服务：systemctl restart resume-agent resume-agent-worker-resume resume-agent-worker-knowledge"

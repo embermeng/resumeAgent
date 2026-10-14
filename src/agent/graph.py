@@ -13,6 +13,7 @@ from src.agent.intent import IntentClassifier, IntentType, IntentResult
 from src.agent.tools import AgentTools
 from src.api_client import APIProcessor
 from src.prompts.resume_prompts import CHITCHAT_SYSTEM
+from src.retrieval.visibility import visible_doc_ids
 from src.config import get_config
 
 _log = logging.getLogger(__name__)
@@ -105,7 +106,9 @@ class ResumeAgent:
             category = "project"
 
         t0 = time.time()
-        knowledge = self.tools.search_knowledge(query, category=category)
+        # 必须带可见性白名单：category=None 会扫全库，category="project" 会命中他人私有项目
+        knowledge = self.tools.search_knowledge(
+            query, category=category, doc_ids=visible_doc_ids(state.get("user_id")))
         retrieval_elapsed = time.time() - t0
 
         # 直接回答
@@ -130,16 +133,18 @@ class ResumeAgent:
         entities = state.get("extracted_entities", {})
         has_job = state.get("has_job_requirement", False)
         existing_resume = state.get("existing_resume") or None
+        user_id = state.get("user_id")
 
         # 提取岗位要求（如有）
         job_requirement = entities.get("job_requirement", user_input) if has_job else None
 
         # 分层检索：LLM根据课程目录选高价值知识点 -> 定向检索对应课程；失败降级为普通混合检索
-        knowledge = self._hierarchical_search(user_input, job_requirement)
-        # 项目素材：优先用预写好的项目介绍成品，无介绍文档时降级检索亮点分块
-        projects = self.tools.select_project_intros(user_input, job_requirement)
+        knowledge = self._hierarchical_search(user_input, job_requirement, user_id=user_id)
+        # 项目素材：项目文档按优先级拼出的素材，无文档时降级检索项目分块
+        projects = self.tools.select_project_docs(
+            user_input, job_requirement, user_id=user_id)
         if not projects:
-            projects = self.tools.search_projects(user_input, top_n=5)
+            projects = self.tools.search_projects(user_input, top_n=5, user_id=user_id)
 
         # 生成简历草稿（有已有简历时作为事实骨架增强生成）
         resume_draft = self.tools.generate_resume(
@@ -163,7 +168,9 @@ class ResumeAgent:
             "step": "deep_thinking_done",
         }
 
-    def _hierarchical_search(self, user_input: str, job_requirement: str = None) -> str:
+    def _hierarchical_search(
+        self, user_input: str, job_requirement: str = None, user_id: int = None
+    ) -> str:
         """分层检索：目录选点 -> 定向检索；任一环节失败降级为普通混合检索"""
         try:
             plan = self.tools.select_resume_knowledge(user_input, job_requirement)
@@ -178,7 +185,9 @@ class ResumeAgent:
                 return knowledge
 
         _log.info("分层检索不可用，降级为普通混合检索")
-        return self.tools.search_knowledge(user_input, top_n=10)
+        # 降级检索不带 category，等于扫全库——必须用可见性白名单限定范围
+        return self.tools.search_knowledge(
+            user_input, top_n=10, doc_ids=visible_doc_ids(user_id))
 
     def _chitchat_path(self, state: AgentState) -> Dict:
         """闲聊兜底路径"""
@@ -204,18 +213,20 @@ class ResumeAgent:
             "step": "chitchat_done",
         }
 
-    def run(self, user_input: str, existing_resume: str = None) -> Dict:
+    def run(self, user_input: str, existing_resume: str = None, user_id: int = None) -> Dict:
         """
         运行Agent
         参数:
             user_input: 用户输入
             existing_resume: 用户提供的已有简历（Markdown文本，仅深思路径生成简历时使用）
+            user_id: 当前用户ID，决定项目素材可见范围（None=仅公共素材）
         返回:
             包含final_response等字段的字典
         """
         initial_state = {
             "messages": [],
             "user_input": user_input,
+            "user_id": user_id,
             "intent": "",
             "extracted_entities": {},
             "has_job_requirement": False,
@@ -231,12 +242,13 @@ class ResumeAgent:
         result = self.graph.invoke(initial_state)
         return result
 
-    def run_stream(self, user_input: str, existing_resume: str = None):
+    def run_stream(self, user_input: str, existing_resume: str = None, user_id: int = None):
         """
         流式运行Agent，逐步yield事件字典（供Web UI增量渲染，SSE效果）
         参数:
             user_input: 用户输入
             existing_resume: 用户提供的已有简历（Markdown文本，仅深思路径生成简历时使用）
+            user_id: 当前用户ID，决定项目素材可见范围（None=仅公共素材）
         事件类型:
             {"type": "status", "text": str}  阶段进度提示
             {"type": "token", "text": str}   回答文本增量
@@ -263,7 +275,10 @@ class ResumeAgent:
 
             yield {"type": "status", "text": "正在检索知识库..."}
             t0 = time.time()
-            knowledge = self.tools.search_knowledge(query, category=category)
+            # 两种 category 都要限定可见范围：None 会扫全库（含他人私有项目分块）
+            knowledge = self.tools.search_knowledge(
+                query, category=category, doc_ids=visible_doc_ids(user_id),
+            )
             retrieval_elapsed = time.time() - t0
 
             yield {"type": "status", "text": "正在生成回答..."}
@@ -296,12 +311,14 @@ class ResumeAgent:
             job_requirement = entities.get("job_requirement", user_input) if has_job else None
 
             yield {"type": "status", "text": "正在分析课程目录，挑选高价值知识点..."}
-            knowledge = self._hierarchical_search(user_input, job_requirement)
+            knowledge = self._hierarchical_search(
+                user_input, job_requirement, user_id=user_id)
 
-            yield {"type": "status", "text": "正在挑选项目介绍..."}
-            projects = self.tools.select_project_intros(user_input, job_requirement)
+            yield {"type": "status", "text": "正在挑选项目文档..."}
+            projects = self.tools.select_project_docs(
+                user_input, job_requirement, user_id=user_id)
             if not projects:
-                projects = self.tools.search_projects(user_input, top_n=5)
+                projects = self.tools.search_projects(user_input, top_n=5, user_id=user_id)
 
             if existing_resume and existing_resume.strip():
                 yield {"type": "status", "text": "📎 检测到已有简历，将基于它增强生成..."}

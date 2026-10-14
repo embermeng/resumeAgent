@@ -1,9 +1,18 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ChatDotRound, ChatLineSquare, Clock, FolderOpened } from '@element-plus/icons-vue'
+import {
+  ChatDotRound,
+  ChatLineSquare,
+  Clock,
+  FolderOpened,
+  Files,
+} from '@element-plus/icons-vue'
 import { useChatStore } from '@/stores/chat'
+import { useProjectStore } from '@/stores/project'
+import { useAuthStore } from '@/stores/auth'
 import ConversationHistory from './ConversationHistory.vue'
+import ProjectDocsPanel from './ProjectDocsPanel.vue'
 
 /**
  * 全局侧边栏(参考企业级 AI 助手布局):
@@ -15,10 +24,28 @@ import ConversationHistory from './ConversationHistory.vue'
 const route = useRoute()
 const router = useRouter()
 const store = useChatStore()
+const projectStore = useProjectStore()
+const authStore = useAuthStore()
+
+/** 管理端入口仅管理员可见(后端对管理端接口同样校验,这里不是安全边界) */
+const isSuperuser = computed(() => authStore.isSuperuser)
 
 const activeMenu = computed<'dialog' | 'admin'>(() =>
   route.path.startsWith('/admin') ? 'admin' : 'dialog',
 )
+
+/** 项目文档抽屉;打开时拉取列表,关闭时清掉上传态避免残留进度条 */
+const docsVisible = ref(false)
+watch(docsVisible, (open) => {
+  if (open) void projectStore.loadDocs()
+  else projectStore.clearUpload()
+})
+
+/** 进页面即拉取一次,侧边栏徽标直接显示正确配额(本组件在鉴权就绪后才挂载);
+ *  打开抽屉时 watch 会再拉一次保持新鲜 */
+onMounted(() => {
+  void projectStore.loadDocs()
+})
 
 function newChat() {
   store.clear()
@@ -49,6 +76,7 @@ function go(menu: 'dialog' | 'admin') {
         <span>智能对话</span>
       </button>
       <button
+        v-if="isSuperuser"
         type="button"
         class="menu-item"
         :class="{ active: activeMenu === 'admin' }"
@@ -59,6 +87,19 @@ function go(menu: 'dialog' | 'admin') {
         <span>知识库管理</span>
       </button>
     </nav>
+
+    <button
+      type="button"
+      class="menu-item"
+      data-test="menu-project-docs"
+      @click="docsVisible = true"
+    >
+      <el-icon><Files /></el-icon>
+      <span>我的项目</span>
+      <span v-if="projectStore.maxDocs > 0" class="menu-badge" data-test="project-count">
+        {{ projectStore.mineCount }}/{{ projectStore.maxDocs }}
+      </span>
+    </button>
 
     <div class="divider" />
 
@@ -71,6 +112,15 @@ function go(menu: 'dialog' | 'admin') {
     </div>
 
     <div class="side-footer">ResumeAgent v1.0</div>
+
+    <el-drawer
+      v-model="docsVisible"
+      title="我的项目文档"
+      size="440px"
+      data-test="project-drawer"
+    >
+      <ProjectDocsPanel />
+    </el-drawer>
   </aside>
 </template>
 
@@ -126,6 +176,12 @@ function go(menu: 'dialog' | 'admin') {
 .menu-item.active {
   background: rgba(78, 110, 242, 0.15);
   color: var(--rp-brand-solid);
+}
+.menu-badge {
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--el-text-color-secondary);
 }
 .divider {
   height: 1px;

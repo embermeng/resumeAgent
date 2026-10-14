@@ -27,7 +27,9 @@ class AgentService:
         return self._agent
 
     def run_stream(
-        self, prompt: str, existing_resume: Optional[str] = None
+        self, prompt: str, existing_resume: Optional[str] = None,
+        user_id: Optional[int] = None,
     ) -> Iterator[Dict[str, Any]]:
-        """透传到 ResumeAgent.run_stream"""
-        return self.agent.run_stream(prompt, existing_resume=existing_resume)
+        """透传到 ResumeAgent.run_stream（user_id 决定项目素材可见范围）"""
+        return self.agent.run_stream(
+            prompt, existing_resume=existing_resume, user_id=user_id)

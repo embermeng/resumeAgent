@@ -5,7 +5,7 @@ CLI入口 - 知识库构建等批处理命令
     python main.py extract-summaries   # 提取课程结构化摘要与目录
     python main.py split-chunks        # 文本分块
     python main.py build-indexes       # 构建向量/BM25索引
-    python main.py ingest-highlights   # 项目亮点文档入库（category=project）
+    python main.py ingest-projects     # 项目文档入库（category=project）
     python main.py build-all           # 一键构建完整知识库
     python main.py chat                # CLI交互模式（测试Agent）
 
@@ -66,9 +66,9 @@ def cmd_build_indexes(args):
     )
 
 
-def cmd_ingest_highlights(args):
-    """项目亮点文档入库：md -> category=project分块，写入course_chunks待建索引"""
-    _service().ingest_highlights(force=getattr(args, "force", False))
+def cmd_ingest_projects(args):
+    """项目文档入库：md -> category=project分块，写入course_chunks待建索引"""
+    _service().ingest_project_docs(force=getattr(args, "force", False))
 
 
 def cmd_build_all(args):
@@ -149,12 +149,12 @@ def main():
     sp_idx.add_argument("--force", action="store_true", help="强制全量重建所有索引")
     sp_idx.add_argument("--prune", action="store_true", help="清理孤儿索引（对应文档已删除/改名）")
 
-    # ingest-highlights
+    # ingest-projects
     sp_hl = subparsers.add_parser(
-        "ingest-highlights",
-        help="项目亮点文档入库（增量，读取project_highlights目录的md）",
+        "ingest-projects",
+        help="项目文档入库（增量，读取project_highlights目录的md）",
     )
-    sp_hl.add_argument("--force", action="store_true", help="强制全量重新入库所有亮点文档")
+    sp_hl.add_argument("--force", action="store_true", help="强制全量重新入库所有项目文档")
 
     # build-all
     sp_all = subparsers.add_parser("build-all", help="一键构建完整知识库（各环节均为增量）")
@@ -177,7 +177,7 @@ def main():
         "extract-summaries": cmd_extract_summaries,
         "split-chunks": cmd_split_chunks,
         "build-indexes": cmd_build_indexes,
-        "ingest-highlights": cmd_ingest_highlights,
+        "ingest-projects": cmd_ingest_projects,
         "build-all": cmd_build_all,
         "chat": cmd_chat,
     }

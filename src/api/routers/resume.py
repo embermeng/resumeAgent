@@ -1,23 +1,30 @@
 """
 简历文件接口:
-  POST /api/resume/parse                     上传文件提交解析任务(Celery)
-  GET  /api/resume/parse/{task_id}           轮询任务状态/结果(DB 权威源)
-  GET  /api/resume/parse/{task_id}/stream    SSE 进度流(DB 快照+轮询转发)
-  GET  /api/resume/supported-extensions      支持的扩展名
-契约见 docs/specs/api-contract.md 第 4.3/4.4/4.5 节。
+  POST   /api/resume/parse                     上传文件提交解析任务(Celery)
+  GET    /api/resume/parse/{task_id}           轮询任务状态/结果(DB 权威源)
+  GET    /api/resume/parse/{task_id}/stream    SSE 进度流(DB 快照+轮询转发)
+  GET    /api/resume/current                   我当前的简历(每人仅一份,含正文,无则 204)
+  DELETE /api/resume/current                   删除我的简历(任务行 + 解析产物文件)
+  GET    /api/resume/supported-extensions      支持的扩展名
+契约见 docs/specs/api-contract.md 第 4.3/4.4/4.4b/4.5/4.5b 节。
 """
 import logging
 from pathlib import Path
 from typing import Annotated
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile
 from fastapi.responses import StreamingResponse
-from sqlalchemy import select
+from sqlalchemy import and_, select
 from sqlalchemy.orm import Session
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.api.schemas_api import ResumeParseAck, ResumeParseStatus, SupportedExtensions
+from src.api.schemas_api import (
+    ResumeCurrent,
+    ResumeParseAck,
+    ResumeParseStatus,
+    SupportedExtensions,
+)
 from src.api.sse import SSE_HEADERS, SSE_MEDIA_TYPE
 from src.auth.security import CurrentUser
 from src.config import get_config
@@ -57,7 +64,8 @@ async def parse_resume(
 
     task_id = uuid4().hex
     insert_task(task_id=task_id, task="parse-resume", user_id=current_user.id, filename=filename)
-    parse_resume_task.apply_async(args=(str(upload), filename), task_id=task_id)
+    # user_id 随消息带给 worker:解析成功要靠它清掉该用户的旧简历,省一次回查 DB
+    parse_resume_task.apply_async(args=(str(upload), filename, current_user.id), task_id=task_id)
     return ResumeParseAck(task_id=task_id, status="pending")
 
 
@@ -91,6 +99,33 @@ async def parse_status(
     )
 
 
+@router.delete("/resume/current", status_code=204)
+async def delete_current_resume(
+    current_user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_async_session)],
+):
+    """
+    删除我的简历:本人全部 parse-resume 行与解析产物一并清除。
+
+    每人只有一份,所以删除针对"我的简历"这个资源而非某个 task_id;
+    顺带清掉历史上多份共存时留下的旧行(存量脏数据自愈)。
+    幂等:本来就没有简历也返回 204,前端不必区分"删掉了"和"早就没有"。
+    """
+    rows = (await db.execute(
+        select(models.BuildTask).where(and_(
+            models.BuildTask.user_id == current_user.id,
+            models.BuildTask.task == "parse-resume",
+        ))
+    )).scalars().all()
+    # 先取路径:delete + commit 之后实例过期,再读属性会抛
+    paths = [r.result_path for r in rows if r.result_path]
+    for r in rows:
+        await db.delete(r)
+    await db.commit()
+    for p in paths:
+        Path(p).unlink(missing_ok=True)
+
+
 @router.get("/resume/parse/{task_id}/stream")
 def parse_stream(
     task_id: str,
@@ -103,3 +138,38 @@ def parse_stream(
         raise HTTPException(status_code=404, detail="task not found")
 
     return StreamingResponse(stream_task_events(task_id), media_type=SSE_MEDIA_TYPE, headers=SSE_HEADERS)
+
+
+@router.get("/resume/current", response_model=ResumeCurrent)
+async def current_resume(
+    current_user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_async_session)],
+):
+    """
+    我当前的简历:每用户只保留一份,前端挂载时据此自动把正文带入生成上下文。
+    没有简历时返回 204 空体(而不是 404:"没传过"是正常状态,不该走错误分支)。
+    """
+    row = (await db.execute(
+        select(models.BuildTask)
+        .where(and_(
+            models.BuildTask.user_id == current_user.id,
+            models.BuildTask.task == "parse-resume",
+            models.BuildTask.status == "success",
+        ))
+        .order_by(models.BuildTask.created_at.desc())
+        .limit(1)
+    )).scalars().first()
+    if row is None:
+        return Response(status_code=204)
+
+    content = None
+    if row.result_path:
+        p = Path(row.result_path)
+        if p.exists():
+            content = p.read_text(encoding="utf-8")
+    return ResumeCurrent(
+        filename=row.filename,
+        created_at=to_epoch(row.created_at),
+        finished_at=to_epoch(row.finished_at),
+        content=content,
+    )

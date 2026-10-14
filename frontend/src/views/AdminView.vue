@@ -9,7 +9,7 @@ import KnowledgeAdmin from '@/components/KnowledgeAdmin.vue'
       <div class="head-text">
         <h2>知识库管理</h2>
         <p class="hint">
-          触发知识库构建任务(解析课程 PDF、提取摘要、分块、构建 BM25/向量索引、项目亮点入库),
+          触发知识库构建任务(解析课程 PDF、提取摘要、分块、构建 BM25/向量索引、项目文档入库),
           并通过 SSE 实时查看进度。
         </p>
       </div>

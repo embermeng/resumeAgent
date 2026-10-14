@@ -37,7 +37,7 @@ def _make_config(parsed_json_glob: bool = True):
     p.processed_dir.__truediv__.side_effect = _truediv
 
     for attr in [
-        "course_chunks_dir", "course_summaries_dir", "project_highlights_dir",
+        "course_chunks_dir", "course_summaries_dir", "projects_dir",
         "bm25_dbs_dir", "vector_dbs_dir", "course_pdfs_dir", "catalog_path",
     ]:
         d = MagicMock()
@@ -58,7 +58,7 @@ class TestBuildAllOrchestration:
         with patch.object(svc, "parse_pdfs"), \
              patch.object(svc, "extract_summaries"), \
              patch.object(svc, "split_chunks"), \
-             patch.object(svc, "ingest_highlights"), \
+             patch.object(svc, "ingest_project_docs"), \
              patch.object(svc, "build_indexes"):
             svc.build_all(progress=progress)
 
@@ -67,7 +67,7 @@ class TestBuildAllOrchestration:
             ("parse-pdfs", 10),
             ("extract-summaries", 35),
             ("split-chunks", 55),
-            ("ingest-highlights", 70),
+            ("ingest-projects", 70),
             ("build-indexes", 90),
         ]
 
@@ -77,10 +77,10 @@ class TestBuildAllOrchestration:
         with patch.object(svc, "parse_pdfs", side_effect=lambda **k: order.append("parse")), \
              patch.object(svc, "extract_summaries", side_effect=lambda **k: order.append("summ")), \
              patch.object(svc, "split_chunks", side_effect=lambda **k: order.append("split")), \
-             patch.object(svc, "ingest_highlights", side_effect=lambda **k: order.append("hl")), \
+             patch.object(svc, "ingest_project_docs", side_effect=lambda **k: order.append("docs")), \
              patch.object(svc, "build_indexes", side_effect=lambda **k: order.append("idx")):
             svc.build_all()
-        assert order == ["parse", "summ", "split", "hl", "idx"]
+        assert order == ["parse", "summ", "split", "docs", "idx"]
 
     def test_subtasks_do_not_report_progress_themselves_in_build_all(self):
         # build_all 调子阶段时不传 progress(避免重复上报),子阶段收到的 progress 为 None
@@ -88,7 +88,7 @@ class TestBuildAllOrchestration:
         with patch.object(svc, "parse_pdfs") as m_parse, \
              patch.object(svc, "extract_summaries"), \
              patch.object(svc, "split_chunks"), \
-             patch.object(svc, "ingest_highlights"), \
+             patch.object(svc, "ingest_project_docs"), \
              patch.object(svc, "build_indexes"):
             svc.build_all(progress=lambda *a: None)
         assert m_parse.call_args.kwargs.get("progress") is None
@@ -101,7 +101,7 @@ class TestRunDispatch:
         ("extract-summaries", "extract_summaries"),
         ("split-chunks", "split_chunks"),
         ("build-indexes", "build_indexes"),
-        ("ingest-highlights", "ingest_highlights"),
+        ("ingest-projects", "ingest_project_docs"),
     ])
     def test_dispatch(self, task, method):
         svc = KnowledgeService(config=MagicMock())
@@ -169,9 +169,9 @@ class TestStagesSmoke:
             MockBM25.return_value.process_chunks_dir.assert_called_once()
             MockVec.return_value.process_chunks_dir.assert_not_called()
 
-    def test_ingest_highlights_calls_ingestor(self):
+    def test_ingest_project_docs_calls_ingestor(self):
         cfg = _make_config()
-        with patch("src.knowledge.highlight_ingestor.HighlightIngestor") as MockHL:
-            KnowledgeService(config=cfg).ingest_highlights(force=True)
-            MockHL.return_value.ingest.assert_called_once()
-            assert MockHL.return_value.ingest.call_args.kwargs["force"] is True
+        with patch("src.knowledge.project_doc.ProjectDocIngestor") as MockPD:
+            KnowledgeService(config=cfg).ingest_project_docs(force=True)
+            MockPD.return_value.ingest.assert_called_once()
+            assert MockPD.return_value.ingest.call_args.kwargs["force"] is True

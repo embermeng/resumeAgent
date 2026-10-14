@@ -4,7 +4,7 @@
 DB(build_tasks)是唯一权威状态源;SSE 走 task_stream 适配器(DB 快照+轮询转发)。
 
 覆盖契约(docs/specs/api-contract.md §4.5/§4.6/§4.7):
-- build 202 受理:先 insert 后投递(竞态守卫)、args 全 JSON 原始类型、无归属(user_id NULL)
+- build 202 受理:先 insert 后投递(竞态守卫)、args 全 JSON 原始类型、user_id 记发起人
 - 非法 task → 422(投递不发生)
 - 状态快照 / 404 / 坑①parse-resume 过滤(status+stream+list 三处)
 - SSE:404 必须在 StreamingResponse 之前、终态快路径、真实轮询转移(progress...done)
@@ -26,8 +26,11 @@ import src.api.routers.knowledge as knowledge_module
 import src.database.models as models  # noqa: F401  注册全部表到 Base.metadata
 import src.worker.task_store as task_store
 from src.api.app import create_app
+from src.auth.security import get_current_user
 from src.database.database import Base, get_async_session, get_session
 from tests.test_api.helpers import event_names, parse_sse
+
+ADMIN_ID = 9
 
 
 @pytest.fixture
@@ -58,6 +61,11 @@ def env(tmp_path, monkeypatch):
 
     app.dependency_overrides[get_session] = _override_sync
     app.dependency_overrides[get_async_session] = _override_async
+    # 知识库端点已全部需登录;build 还需管理员,故默认以管理员身份访问。
+    # 单独的越权/403 用例见 tests/test_api/test_knowledge_auth.py。
+    app.dependency_overrides[get_current_user] = lambda: models.User(
+        id=ADMIN_ID, username="admin", email="admin@x.com",
+        password_hash="x", is_superuser=True)
     client = TestClient(app)
 
     def seed_task(**kw):
@@ -96,11 +104,12 @@ class TestBuild:
         assert kw["args"] == ("build-all", True, 300, 50, False)
         json.dumps(kw["args"])
 
-        # DB 行已就位:pending + queued/0 初值;构建任务无归属无文件名(决策:不扩 scope)
+        # DB 行已就位:pending + queued/0 初值;无文件名
+        # user_id 记发起人(此前为 NULL,阶段 4 补鉴权后改记 current_user)
         row = env.db_row(tid)
         assert (row.status, row.task) == ("pending", "build-all")
         assert (row.stage, row.percent) == ("queued", 0)
-        assert row.user_id is None and row.filename is None
+        assert row.user_id == ADMIN_ID and row.filename is None
 
     def test_insert_before_delay_race_guard(self, env):
         """经典竞态回归:投递那一刻 DB 必须已有 pending 行(先 insert 再 apply_async)"""
@@ -139,6 +148,12 @@ class TestTaskStatus:
         env.seed_task(task_id="tp", task="parse-resume", status="success", user_id=1)
         assert env.client.get("/api/knowledge/tasks/tp").status_code == 404
 
+    @pytest.mark.parametrize("foreign", ["ingest-project", "ingest-highlights"])
+    def test_foreign_task_rows_hidden_404(self, env, foreign):
+        """表里外来 task 值(项目文档入库的单数写法、改名前的残留)一律不可见"""
+        env.seed_task(task_id="tx", task=foreign, status="success", user_id=1)
+        assert env.client.get("/api/knowledge/tasks/tx").status_code == 404
+
 
 class TestTaskList:
     def test_list_excludes_parse_resume(self, env):
@@ -152,6 +167,23 @@ class TestTaskList:
         ids = [t["task_id"] for t in body["tasks"]]
         assert "tp" not in ids and {"t1", "t2"} == set(ids)
 
+    def test_list_survives_unknown_task_values(self, env):
+        """
+        过滤是"只认 TaskKind 白名单",不是逐个排除已知外来值。
+        真机 500 就是这么来的:库里 41 行 task="ingest-project"(项目文档入库写的)
+        不在出参 Literal 里,一行脏数据让整个任务列表接口崩掉。
+        """
+        env.seed_task(task_id="t1", task="build-all", status="success")
+        env.seed_task(task_id="ti", task="ingest-project", status="pending", user_id=1)
+        env.seed_task(task_id="th", task="ingest-highlights", status="success", user_id=1)
+        env.seed_task(task_id="tfuture", task="some-new-kind", status="running", user_id=1)
+
+        r = env.client.get("/api/knowledge/tasks")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["total"] == 1
+        assert [t["task_id"] for t in body["tasks"]] == ["t1"]
+
 
 class TestTaskStream:
     def test_stream_404_before_response(self, env):
@@ -161,6 +193,12 @@ class TestTaskStream:
     def test_stream_parse_resume_404(self, env):
         env.seed_task(task_id="tp", task="parse-resume", status="running", user_id=1)
         assert env.client.get("/api/knowledge/tasks/tp/stream").status_code == 404
+
+    def test_stream_foreign_task_404(self, env):
+        """项目文档入库的任务有自己的流式端点(/api/project/upload/{id}/stream),
+        走 knowledge 的应当 404,而不是打开一条读外来行的流"""
+        env.seed_task(task_id="ti", task="ingest-project", status="running", user_id=1)
+        assert env.client.get("/api/knowledge/tasks/ti/stream").status_code == 404
 
     def test_terminal_fast_path_done_only(self, env):
         """订阅时已终态:快照检查后直接 done,不进轮询"""

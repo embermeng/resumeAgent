@@ -29,7 +29,8 @@ class TestAgentService:
         events = list(svc.run_stream("你好"))
 
         assert events == stream
-        fake.run_stream.assert_called_once_with("你好", existing_resume=None)
+        fake.run_stream.assert_called_once_with(
+            "你好", existing_resume=None, user_id=None)
 
     def test_passes_existing_resume(self):
         fake = MagicMock()

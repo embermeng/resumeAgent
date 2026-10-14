@@ -42,7 +42,7 @@ class TestBuildRequest:
     def test_all_task_kinds_accepted(self):
         for kind in [
             "build-all", "parse-pdfs", "extract-summaries",
-            "split-chunks", "build-indexes", "ingest-highlights",
+            "split-chunks", "build-indexes", "ingest-projects",
         ]:
             assert BuildRequest(task=kind).task == kind
 

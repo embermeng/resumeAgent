@@ -5,6 +5,7 @@ import { sseResponse, sseDropResponse, stubFetch, jsonResponse } from '@/test/ss
 
 beforeEach(() => {
   sessionStorage.clear()
+  localStorage.clear()
   setActivePinia(createPinia())
 })
 afterEach(() => {
@@ -15,6 +16,11 @@ afterEach(() => {
 function pushAssistant(store: ReturnType<typeof useChatStore>) {
   store.messages.push({ id: 'a', role: 'assistant', content: '', streaming: true })
   return store.messages[store.messages.length - 1]
+}
+
+/** 「我的简历」端点(§4.5b GET /resume/current)的 fetch 桩 */
+function stubCurrentResumeServer(body: unknown, init: { ok?: boolean; status?: number } = {}) {
+  return stubFetch(async () => jsonResponse(body, init))
 }
 
 describe('chat store', () => {
@@ -107,6 +113,170 @@ describe('chat store', () => {
     const store = useChatStore()
     await store.send('hi')
     expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({ prompt: 'hi' })
+  })
+
+  it('setExistingResume: 写入 sessionStorage 并记录文件名与解析时间', () => {
+    const store = useChatStore()
+    store.setExistingResume('# 旧简历', '全栈开发工程师.docx', 1234)
+    expect(JSON.parse(sessionStorage.getItem('resumeagent.existing_resume')!)).toEqual({
+      filename: '全栈开发工程师.docx',
+      content: '# 旧简历',
+      created_at: 1234,
+    })
+    expect(store.existingResumeTime).toBe(1234)
+  })
+
+  it('刷新后新建 store 从 sessionStorage 回显简历与文件名', () => {
+    useChatStore().setExistingResume('# 旧简历', 'a.docx')
+    // 模拟刷新:store 实例重建,sessionStorage 仍在
+    setActivePinia(createPinia())
+    const reloaded = useChatStore()
+    expect(reloaded.existingResume).toBe('# 旧简历')
+    expect(reloaded.existingResumeName).toBe('a.docx')
+  })
+
+  it('刷新后 send 仍透传 existing_resume(避免再生成丢失事实骨架)', async () => {
+    const fetchMock = stubFetch(async () =>
+      sseResponse(['event: done\ndata: {"intent":"chitchat","step":"chitchat_done"}\n\n']),
+    )
+    useChatStore().setExistingResume('# 旧简历', 'a.docx')
+    setActivePinia(createPinia())
+    await useChatStore().send('hi')
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({
+      prompt: 'hi',
+      existing_resume: '# 旧简历',
+    })
+  })
+
+  it('clearExistingResume: 清除持久化,刷新后不再回显', () => {
+    const store = useChatStore()
+    store.setExistingResume('# 旧简历', 'a.docx')
+    store.clearExistingResume()
+    expect(sessionStorage.getItem('resumeagent.existing_resume')).toBeNull()
+    setActivePinia(createPinia())
+    expect(useChatStore().existingResume).toBe('')
+  })
+
+  it('脏持久化值不恢复', () => {
+    sessionStorage.setItem('resumeagent.existing_resume', 'not-json')
+    expect(useChatStore().existingResume).toBe('')
+    sessionStorage.setItem('resumeagent.existing_resume', JSON.stringify({ filename: 'a', content: '' }))
+    setActivePinia(createPinia())
+    expect(useChatStore().existingResume).toBe('')
+  })
+
+  it('loadCurrentResume: 从服务端取回我的简历并自动带入上下文', async () => {
+    stubCurrentResumeServer({ filename: 'new.docx', created_at: 200, finished_at: 201, content: '# 张三简历' })
+    const store = useChatStore()
+    await store.loadCurrentResume()
+    expect(store.existingResume).toBe('# 张三简历')
+    expect(store.existingResumeName).toBe('new.docx')
+    expect(store.existingResumeTime).toBe(200)
+    expect(store.hasResume).toBe(true)
+    // 顺带写入 sessionStorage 快路径:同标签页再次刷新不必再拉
+    expect(JSON.parse(sessionStorage.getItem('resumeagent.existing_resume')!).content).toBe('# 张三简历')
+  })
+
+  it('loadCurrentResume: 204(从没传过)→ 清掉本地残留,避免带着半份简历去生成', async () => {
+    const store = useChatStore()
+    store.setExistingResume('# 本地残留', 'gone.docx')
+    stubCurrentResumeServer(undefined, { status: 204 })
+    await store.loadCurrentResume()
+    expect(store.existingResume).toBe('')
+    expect(store.hasResume).toBe(false)
+    expect(sessionStorage.getItem('resumeagent.existing_resume')).toBeNull()
+  })
+
+  it('loadCurrentResume: 产物文件丢失(content=null)→ 元信息照常回显但不塞空正文', async () => {
+    stubCurrentResumeServer({ filename: 'a.docx', created_at: 300, content: null })
+    const store = useChatStore()
+    await store.loadCurrentResume()
+    expect(store.existingResume).toBe('')
+    expect(store.existingResumeName).toBe('a.docx')
+    // 删除入口仍要给(否则这份坏数据永远清不掉)
+    expect(store.hasResume).toBe(true)
+  })
+
+  it('loadCurrentResume: 请求期间用户自己传了简历 → 不被旧响应顶回', async () => {
+    const store = useChatStore()
+    stubFetch(async () => {
+      store.setExistingResume('# 刚上传', 'manual.docx', 999) // 等待期间用户自己传了一份
+      return jsonResponse({ filename: 'old.docx', created_at: 1, content: '# 旧的' })
+    })
+    await store.loadCurrentResume()
+    expect(store.existingResume).toBe('# 刚上传')
+    expect(store.existingResumeName).toBe('manual.docx')
+    expect(store.existingResumeTime).toBe(999)
+  })
+
+  it('loadCurrentResume: 请求期间用户点了删除 → 不把简历又带回来', async () => {
+    const store = useChatStore()
+    store.setExistingResume('# 简历', 'a.docx')
+    stubFetch(async () => {
+      store.clearExistingResume() // 等待期间被删除
+      return jsonResponse({ filename: 'a.docx', created_at: 1, content: '# 简历' })
+    })
+    await store.loadCurrentResume()
+    expect(store.existingResume).toBe('')
+    expect(store.hasResume).toBe(false)
+  })
+
+  it('loadCurrentResume: 接口失败保留本地态(不误清用户的简历)', async () => {
+    sessionStorage.setItem(
+      'resumeagent.existing_resume',
+      JSON.stringify({ filename: 'a.md', content: '# 旧', created_at: 5 }),
+    )
+    stubCurrentResumeServer({ detail: 'boom' }, { ok: false, status: 500 })
+    const store = useChatStore()
+    await store.loadCurrentResume()
+    expect(store.existingResume).toBe('# 旧')
+    expect(store.existingResumeName).toBe('a.md')
+  })
+
+  it('removeResume: 走 DELETE /resume/current(每人一份,不再按 task_id 定位)', async () => {
+    const store = useChatStore()
+    store.setExistingResume('# 简历', 'a.docx')
+    const fetchMock = stubFetch(async () => jsonResponse(undefined, { status: 204 }))
+    expect(await store.removeResume()).toBe(true)
+    expect(String(fetchMock.mock.calls[0][0])).toContain('/resume/current')
+    expect(fetchMock.mock.calls[0][1]?.method).toBe('DELETE')
+  })
+
+  it('removeResume: 删除成功 → 正文、文件名与 sessionStorage 一并清掉', async () => {
+    const store = useChatStore()
+    store.setExistingResume('# 简历', 'a.docx', 100)
+    stubFetch(async () => jsonResponse(undefined, { status: 204 }))
+    await store.removeResume()
+    expect(store.existingResume).toBe('')
+    expect(store.existingResumeName).toBe('')
+    expect(store.existingResumeTime).toBeNull()
+    expect(store.hasResume).toBe(false)
+    expect(sessionStorage.getItem('resumeagent.existing_resume')).toBeNull()
+    // 刷新后也不会被 sessionStorage 复活
+    setActivePinia(createPinia())
+    expect(useChatStore().existingResume).toBe('')
+  })
+
+  it('removeResume: 接口失败返回 false 且本地简历不动', async () => {
+    const store = useChatStore()
+    store.setExistingResume('# 简历', 'a.docx')
+    stubCurrentResumeServer({ detail: 'boom' }, { ok: false, status: 500 })
+    expect(await store.removeResume()).toBe(false)
+    expect(store.existingResume).toBe('# 简历')
+    expect(store.hasResume).toBe(true)
+  })
+
+  it('回捞后 send 自动带入简历,不需要用户再点"附加"', async () => {
+    const fetchMock = stubFetch(async (url: string) =>
+      String(url).includes('/resume/current')
+        ? jsonResponse({ filename: 'a.docx', created_at: 1, content: '# 服务端简历' })
+        : sseResponse(['event: done\ndata: {"intent":"chitchat","step":"chitchat_done"}\n\n']),
+    )
+    const store = useChatStore()
+    await store.loadCurrentResume()
+    await store.send('hi')
+    const bodies = fetchMock.mock.calls.map((c) => String(c[1]?.body))
+    expect(bodies.some((b) => b.includes('# 服务端简历'))).toBe(true)
   })
 
   it('clear: 清空消息与状态', async () => {
@@ -238,6 +408,60 @@ describe('chat store', () => {
     await store.openConversation(1)
     expect(fetchMock).not.toHaveBeenCalled()
     expect(store.conversationId).toBeNull()
+  })
+
+  it('removeConversation: DELETE /conversations/{id} 成功后从列表剔除并减 total', async () => {
+    const fetchMock = stubFetch(async () => jsonResponse(undefined, { status: 204 }))
+    const store = useChatStore()
+    store.history = [
+      { id: 4, title: 'a', created_at: 1, updated_at: 2 },
+      { id: 3, title: 'b', created_at: 1, updated_at: 2 },
+    ]
+    store.historyTotal = 25
+
+    await expect(store.removeConversation(4)).resolves.toBe(true)
+    expect(String(fetchMock.mock.calls[0][0])).toBe('/api/conversations/4')
+    expect(fetchMock.mock.calls[0][1]?.method).toBe('DELETE')
+    expect(store.history.map((c) => c.id)).toEqual([3])
+    // total 是服务端分页口径,本地减一保持一致(不是清成 history.length)
+    expect(store.historyTotal).toBe(24)
+  })
+
+  it('removeConversation: 删的是当前会话 → 回到新会话态并清 sessionStorage', async () => {
+    stubFetch(async () => jsonResponse(undefined, { status: 204 }))
+    const store = useChatStore()
+    store.history = [{ id: 4, title: 'a', created_at: 1, updated_at: 2 }]
+    store.historyTotal = 1
+    store.messages = [{ id: 'u', role: 'user', content: 'hi' }]
+    store.conversationId = 4
+    store.persistConversationId(4)
+    store.setExistingResume('# 简历', 'a.md', 100)
+
+    await expect(store.removeConversation(4)).resolves.toBe(true)
+    expect(store.conversationId).toBeNull()
+    expect(store.messages).toHaveLength(0)
+    expect(sessionStorage.getItem('resumeagent.conversation_id')).toBeNull()
+    expect(store.history).toHaveLength(0)
+    expect(store.historyTotal).toBe(0)
+    // 会话归会话,简历归简历:删会话不能把简历上下文一起抹掉
+    expect(store.existingResume).toBe('# 简历')
+  })
+
+  it('removeConversation: 失败返回 false 且列表与会话态都不动', async () => {
+    stubFetch(async () =>
+      jsonResponse({ detail: 'conversation not found' }, { ok: false, status: 404 }),
+    )
+    const store = useChatStore()
+    store.history = [{ id: 4, title: 'a', created_at: 1, updated_at: 2 }]
+    store.historyTotal = 1
+    store.messages = [{ id: 'u', role: 'user', content: 'hi' }]
+    store.conversationId = 4
+
+    await expect(store.removeConversation(4)).resolves.toBe(false)
+    expect(store.history).toHaveLength(1)
+    expect(store.historyTotal).toBe(1)
+    expect(store.conversationId).toBe(4)
+    expect(store.messages).toHaveLength(1)
   })
 
   // ---- 并行线:工具时间线 / TTFT 埋点 / 重试 / 内容保全 ----

@@ -1,19 +1,20 @@
-"""简历解析接口测试(Celery 版):/api/resume/parse 三端点 + 受理竞态守卫 + 坑①回归。
+"""简历解析接口测试(Celery 版):/api/resume/* 五端点 + 受理竞态守卫 + 坑①回归。
 
 架构:端点受理后 apply_async 投递(被 patch 拦截,不连真 broker),DB(build_tasks)
 是唯一权威状态源——受理时 insert pending 行,worker 更新,端点只读。
 SSE 走 task_stream 适配器(DB 快照首帧 + 轮询转发)。
 
-覆盖契约 docs/specs/api-contract.md §4.3(提交)/§4.4(状态)/§4.5(流),以及:
+覆盖契约 docs/specs/api-contract.md §4.3(提交)/§4.4(状态)/§4.4b(删除)/§4.5(流)/§4.5b(我的当前简历),以及:
   - 受理竞态:先 insert 后 delay(投递那一刻 pending 行必须已存在)
   - 消息只带可序列化字符串参数(路径+文件名),字节落盘
   - IDOR:跨用户查询/订阅统一 404
   - SSE 404 必须在 StreamingResponse 之前
+  - 每人一份简历:当前简历取最近一条成功行,无简历走 204 而非 404
   - 坑①回归:parse-resume 不得污染 knowledge 列表/状态(Step B 后 knowledge 也只读 DB,过滤在查询层)
 """
 import threading
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -122,13 +123,15 @@ class TestParseSubmit:
         assert body["status"] == "pending"
         tid = body["task_id"]
 
-        # 投递契约:apply_async 显式带 task_id(与回执一致),args 只含可序列化字符串
+        # 投递契约:apply_async 显式带 task_id(与回执一致),args 只含可序列化参数
         env.apply_async.assert_called_once()
         kw = env.apply_async.call_args.kwargs
         assert kw["task_id"] == tid
-        path_arg, name_arg = kw["args"]
-        assert all(isinstance(a, str) for a in (path_arg, name_arg))
+        path_arg, name_arg, uid_arg = kw["args"]
+        assert isinstance(path_arg, str) and isinstance(name_arg, str)
         assert name_arg == "resume.md"
+        # 第三参 user_id:worker 成功回写后据此清掉该用户的旧简历(每人只留一份)
+        assert uid_arg == 1
 
         # DB 行已就位:pending + queued/0 初值 + 归属 + 文件名
         row = env.db_row(tid)
@@ -213,7 +216,127 @@ class TestParseStatus:
         assert env.client.get("/api/resume/parse/t-2").status_code == 404
 
 
+class TestCurrentResume:
+    """GET /api/resume/current:每人一份简历,前端挂载即取回正文自动带入上下文。"""
+
+    def test_returns_newest_success_with_content(self, env):
+        now = datetime.now(UTC)
+        old_md = env.tmp_path / "old.md"
+        old_md.write_text("# 旧简历", encoding="utf-8")
+        new_md = env.tmp_path / "new.md"
+        new_md.write_text("# 新简历", encoding="utf-8")
+        env.seed_task(task_id="t-old", task="parse-resume", status="success", user_id=1,
+                      filename="old.docx", result_path=str(old_md),
+                      created_at=now - timedelta(minutes=5), finished_at=now - timedelta(minutes=4))
+        env.seed_task(task_id="t-new", task="parse-resume", status="success", user_id=1,
+                      filename="new.docx", result_path=str(new_md),
+                      created_at=now, finished_at=now)
+        r = env.client.get("/api/resume/current")
+        assert r.status_code == 200
+        body = r.json()
+        # 每人只留一份由 worker 成功回写时清理;存量多行时取最近一条
+        assert body["filename"] == "new.docx"
+        assert body["content"] == "# 新简历"
+        assert isinstance(body["created_at"], float)
+        # 简历是单数资源:删除走 DELETE /resume/current,这里不外泄 task_id
+        assert "task_id" not in body
+
+    def test_excludes_other_users_and_knowledge_tasks(self, env):
+        now = datetime.now(UTC)
+        md = env.tmp_path / "mine.md"
+        md.write_text("# 我的", encoding="utf-8")
+        env.seed_task(task_id="t-mine", task="parse-resume", status="success", user_id=1,
+                      filename="mine.docx", result_path=str(md), created_at=now)
+        env.seed_task(task_id="t-other", task="parse-resume", status="success", user_id=2,
+                      filename="other.docx", created_at=now + timedelta(minutes=1))
+        env.seed_task(task_id="t-legacy", task="parse-resume", status="success",
+                      filename="legacy.docx", created_at=now + timedelta(minutes=2))  # 无归属
+        env.seed_task(task_id="t-build", task="build-all", status="success", user_id=1,
+                      created_at=now + timedelta(minutes=3))
+        body = env.client.get("/api/resume/current").json()
+        assert body["filename"] == "mine.docx"
+        assert body["content"] == "# 我的"
+
+    def test_unfinished_latest_falls_back_to_last_success(self, env):
+        """重传正在解析或失败时,已有的那份仍要能用(否则用户当下就没简历了)。"""
+        now = datetime.now(UTC)
+        md = env.tmp_path / "keep.md"
+        md.write_text("# 仍可用", encoding="utf-8")
+        env.seed_task(task_id="t-ok", task="parse-resume", status="success", user_id=1,
+                      filename="keep.docx", result_path=str(md), created_at=now)
+        env.seed_task(task_id="t-run", task="parse-resume", status="running", user_id=1,
+                      filename="wip.docx", created_at=now + timedelta(minutes=1))
+        env.seed_task(task_id="t-bad", task="parse-resume", status="failed", user_id=1,
+                      filename="bad.docx", created_at=now + timedelta(minutes=2))
+        body = env.client.get("/api/resume/current").json()
+        assert body["filename"] == "keep.docx"
+
+    def test_missing_result_file_content_null(self, env):
+        env.seed_task(task_id="t-gone", task="parse-resume", status="success", user_id=1,
+                      filename="gone.docx",
+                      result_path=str(env.tmp_path / "not-here.md"),
+                      created_at=datetime.now(UTC))
+        body = env.client.get("/api/resume/current").json()
+        assert body["filename"] == "gone.docx"
+        assert body["content"] is None
+
+    def test_no_resume_204_empty_body(self, env):
+        r = env.client.get("/api/resume/current")
+        assert r.status_code == 204
+        assert r.content == b""
+
+    def test_requires_auth_401(self):
+        assert TestClient(create_app()).get("/api/resume/current").status_code == 401
+
+
+class TestDeleteCurrentResume:
+    """DELETE /api/resume/current:删我的简历 = 本人行 + 产物全清,删完即无。"""
+
+    def test_removes_rows_and_files(self, env):
+        out = env.tmp_path / "r1.md"
+        out.write_text("# 张三的简历", encoding="utf-8")
+        stale = env.tmp_path / "stale.md"
+        stale.write_text("# 上一版", encoding="utf-8")
+        env.seed_task(task_id="t-cur", task="parse-resume", status="success", user_id=1,
+                      filename="resume.docx", result_path=str(out))
+        # 存量多行(单份约束上线前传的)一并清掉,否则删掉最新一条后又"复活"成旧的
+        env.seed_task(task_id="t-old", task="parse-resume", status="success", user_id=1,
+                      filename="old.docx", result_path=str(stale))
+        assert env.client.delete("/api/resume/current").status_code == 204
+        assert env.db_row("t-cur") is None and env.db_row("t-old") is None
+        assert not out.exists() and not stale.exists()
+        assert env.client.get("/api/resume/current").status_code == 204
+
+    def test_missing_file_still_deletes_row(self, env):
+        """产物已被外部清理时删除仍要成功——留着一个取不到正文的行更糟。"""
+        env.seed_task(task_id="t-gone", task="parse-resume", status="success", user_id=1,
+                      result_path=str(env.tmp_path / "gone.md"))
+        assert env.client.delete("/api/resume/current").status_code == 204
+        assert env.db_row("t-gone") is None
+
+    def test_idempotent_when_nothing_to_delete(self, env):
+        assert env.client.delete("/api/resume/current").status_code == 204
+
+    def test_other_users_and_knowledge_tasks_untouched(self, env):
+        """归属条件不许越界:别人的简历行、本人的知识库任务都不能被删。"""
+        other = env.tmp_path / "other.md"
+        other.write_text("# 别人的", encoding="utf-8")
+        env.seed_task(task_id="t-2", task="parse-resume", status="success", user_id=2,
+                      filename="other.docx", result_path=str(other))
+        env.seed_task(task_id="tb", task="build-all", status="success", user_id=1)
+        env.seed_task(task_id="t-null", task="parse-resume", status="success",
+                      filename="legacy.docx")   # 历史无归属行
+        assert env.client.delete("/api/resume/current").status_code == 204
+        assert env.db_row("t-2") is not None and other.exists()
+        assert env.db_row("tb") is not None
+        assert env.db_row("t-null") is not None
+
+    def test_requires_auth_401(self):
+        assert TestClient(create_app()).delete("/api/resume/current").status_code == 401
+
+
 class TestParseStream:
+
     def test_stream_404_before_response(self, env):
         # 404 必须在 StreamingResponse 之前 raise(响应开始流后状态码锁死 200)
         assert env.client.get("/api/resume/parse/nope/stream").status_code == 404

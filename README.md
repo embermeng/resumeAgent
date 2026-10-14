@@ -12,10 +12,12 @@
 - **项目介绍文档管理**：用户离线生成的简历措辞成品直接放入目录，生成简历时遍历挑选、全文引用（主路径，不入库不向量化）
 - **项目亮点文档入库**：项目亮点 README 入库打上 `project` 类别标签，供项目知识问答与素材兜底
 - **智能问答**：基于知识库的技术知识问答（RAG）
-- **简历生成**：综合课程知识分块 + 项目介绍成品（无介绍文档时降级用亮点分块），自动生成/优化简历
+- **简历生成**：综合课程知识分块 + 项目文档的「简历描述」章节（无该章节时降级用全文），自动生成/优化简历
 - **基于已有简历生成**：Web 侧边栏上传已有简历（Word/PDF/md/txt，按类型分流解析），生成时沿用其章节结构与字段顺序，保留其中真实事实（个人信息/教育/工作经历）并用知识库素材增强措辞
 - **双模式路由**：Agent 自动判断意图，选择快速回答或深度思考路径
 - **多用户鉴权**：email 注册登录，JWT access + refresh cookie 双令牌（jti 轮换/令牌族连坐吊销），对话与消息按用户隔离
+- **项目文档隔离**：每个用户上传自己的项目文档，检索时按可见范围收敛；课程知识为公共资源
+- **管理员**：`users.is_superuser` 才可执行知识库全局构建（`build-all`），前端 `/admin` 入口同步显隐
 
 ---
 
@@ -31,9 +33,8 @@ ResumeAgent/
 │
 ├── data/
 │   ├── knowledge_base/
-│   │   ├── course_pdfs/        # ← 放入课程 PDF 文件
-│   │   ├── project_intros/     # ← 放入项目介绍文档（.md，简历主路径）
-│   │   └── project_highlights/ # ← 放入项目亮点文档（.md，问答/兜底）
+│   │   ├── course_pdfs/        # ← 放入课程 PDF 文件（公共知识）
+│   │   └── projects/           # 项目文档：根下=公共示例，u{user_id}/=该用户私有
 │   ├── processed/           # 处理后的中间数据（自动生成）
 │   └── databases/           # 向量索引和 BM25 索引（自动生成）
 │
@@ -48,7 +49,8 @@ ResumeAgent/
 │   └── api/                 # FastAPI 后端（app/routers/services/task_stream/sse）
 │
 ├── frontend/                # Vue3 + Vite + TS 前端（Pinia/Element Plus/Vitest）
-├── tests/                   # 后端测试：364 passed（含 test_api/ 与 test_auth/）
+├── scripts/                 # 一次性迁移脚本（migrate_project_docs.py）
+├── tests/                   # 后端测试：488 passed（含 test_api/ 与 test_auth/）
 └── docs/                    # 设计文档、报告与 specs/api-contract.md（前后端契约）
 ```
 
@@ -103,29 +105,48 @@ data/knowledge_base/course_pdfs/
 └── ...
 ```
 
-#### 3.2 放入项目介绍文档（简历主路径，推荐）
+#### 3.2 准备项目文档（一个项目一份 .md）
 
-项目介绍是**简历措辞成品**：你用提示词+大模型离线生成，一个项目一份，**放入目录即生效，无需任何构建命令**：
+**一个项目只需一份文档**，两种消费方式：
 
-1. 用 [`src/prompts/生成项目介绍.md`](src/prompts/生成项目介绍.md) 中的提示词，把项目材料（亮点文档/源码说明）改写成简历项目介绍（需有 `# 项目名` 一级标题和 `## 一句话简介` 章节）
-2. 将 `.md` 放入 `data/knowledge_base/project_intros/`
-3. （可选）必上简历的项目在一级标题后加一行 `> 标签：简历优先`
-4. 直接去生成简历，无需入库/建索引（改文档后同样即时生效）
+- **简历生成** → 取文档的「简历描述」章节直接引用（措辞稳定、无需现场生成）
+- **知识问答** → 全部章节分块入库，参与混合检索
 
-生成简历时深思路径会遍历该目录：文档数 **≤6 份时全部使用**；超过时 LLM 根据“项目名+一句话简介”轻量目录按诉求/岗位挑选（标签项目必选且排前，挑选失败自动兜底）。入选文档全文直接进简历生成上下文，项目经历部分无需现场措辞，更快且措辞稳定。
+文档约定：
 
-#### 3.3 放入项目亮点文档（知识问答与兜底）
+```markdown
+# 项目名                    ← 必需，项目名的唯一来源
 
-**用提示词把每个项目总结成一份亮点文档再入库**（内容可控、无 API 成本）：
+> 标签：简历优先             ← 可选，多个用、/,分隔
 
-1. 用 [`src/prompts/总结项目亮点.md`](src/prompts/总结项目亮点.md) 中的提示词，让 AI 把每个项目总结成一份亮点 README（含技术栈、亮点、量化成果等固定章节）
-2. 将生成的 `.md` 文件放入 `data/knowledge_base/project_highlights/`（一个项目一份，文档需有 `# 项目名` 一级标题）
-3. （可选）给重点项目打标签：在一级标题后加一行 `> 标签：简历优先`（多个标签用、/,分隔）
-4. 运行 `python main.py ingest-highlights` 入库，再 `build-indexes` 建索引（或直接 `build-all`）
+## 一句话简介                ← 建议，供 LLM 按岗位挑选项目
+一句话概括项目。
 
-入库时文档会按章节分块并打上 `category="project"` 标签，与课程知识区分开；用于项目相关的快速问答（如“我这个项目用了什么技术栈”），并在未放项目介绍文档时作为简历生成的兜底素材。后续也支持网页上传到该目录，入库流程不变。
+## 简历描述                  ← 强烈建议：简历引用的就是这一段
+精炼的简历措辞成品，可直接放进简历。
 
-**优先标签的作用**：打了 `简历优先` 标签的项目在检索项目素材时被定向保证入选（每个标签项目至少一块、轮询交错排序靠前），剩余名额才由其余项目按相关度竞争。想让某个项目上简历，给它加这行标签再重跑入库即可；改标签后无需重建全部索引，只有变更文档会增量重建。项目介绍文档（3.2）沿用同一标签约定（必选项目）。
+## 技术栈                    ┐
+## 项目难点                  ├─ 其余章节按二级标题切块入库，供检索
+## 量化成果                  ┘
+```
+
+> 没有「简历描述」章节也能用，会**降级为引用全文**——措辞不如单独写一段精炼。
+> 前端文档列表会对这类文档标黄提示。
+
+**两种放入方式**：
+
+| 方式 | 操作 |
+|---|---|
+| Web 上传（推荐） | 侧边栏「我的项目」→ 拖入 `.md`，自动完成解析、分块、建索引。同名项目直接覆盖 |
+| CLI 批量 | 放进 `data/knowledge_base/projects/` 后跑 `python main.py ingest-projects` + `build-indexes`（或 `build-all`） |
+
+**多用户隔离**：`projects/` 根目录下的是**公共素材**（所有登录用户可见，适合放脱敏示例）；
+`projects/u{user_id}/` 是该用户私有文档（Web 上传的落点）。
+**你自己的真实项目不要放在公共区**，否则会被其他注册用户用于生成简历。
+
+生成简历时：文档数 **≤6 份时全部使用**；超过时 LLM 根据「项目名+一句话简介」的轻量目录按诉求/岗位挑选（标签项目必选且排前，挑选失败自动兜底）。
+
+**优先标签的作用**：打了 `简历优先` 标签的项目在检索项目素材时被定向保证入选（每个标签项目至少一块、轮询交错排序靠前），剩余名额才由其余项目按相关度竞争。改标签后无需重建全部索引，只有变更文档会增量重建。
 
 ---
 
@@ -141,8 +162,8 @@ python main.py build-all
 1. 解析 PDF → Markdown
 2. 提取课程摘要目录（分层检索用）
 3. 文本分块（按 token 数切分）
-4. 项目亮点文档入库（`project_highlights/` 下的 md，打 `project` 标签）
-5. 构建 FAISS 向量索引 + BM25 索引（课程与项目亮点合并建索引）
+4. 项目文档入库（`projects/` 下的 md，打 `project` 标签）
+5. 构建 FAISS 向量索引 + BM25 索引（课程与项目文档合并建索引）
 
 ### 方式二：分步执行
 
@@ -156,8 +177,8 @@ python main.py parse-pdfs
 python main.py split-chunks
 python main.py split-chunks --chunk-size 500 --chunk-overlap 100  # 自定义参数
 
-# 第 3 步：项目亮点文档入库（需已放入 project_highlights/）
-python main.py ingest-highlights
+# 第 3 步：项目文档入库（需已放入 projects/）
+python main.py ingest-projects
 
 # 第 4 步：构建向量索引和 BM25 索引
 python main.py build-indexes
@@ -198,7 +219,7 @@ data/databases/
 └── bm25_dbs/            # BM25 全文检索索引
 ```
 
-> **提示**：简历生成使用的项目素材是 `course_chunks/` 中 `category="project"` 的亮点分块（由 `project_highlights/` 的 md 入库而来），可随时编辑后重跑 `ingest-highlights` + `build-indexes` 增量生效。
+> **提示**：简历生成使用的项目素材是 `course_chunks/` 中 `category="project"` 的分块（由 `projects/` 的 md 入库而来），可随时编辑后重跑 `ingest-projects` + `build-indexes` 增量生效。
 
 ---
 
@@ -278,7 +299,9 @@ Bye!
 
 - **后端**（`app_api.py` + `src/api/`）：FastAPI 应用工厂，复用 `src.*` 全部逻辑，不改动 Agent。
   - `POST /api/chat`（SSE）：封装 `ResumeAgent.run_stream()`，逐帧下发 `status/intent/token/done/error`。
-  - `POST /api/resume/parse`、`GET /api/resume/supported-extensions`：简历文件上传解析。
+  - `POST /api/resume/parse`、`GET /api/resume/supported-extensions`：简历文件上传解析。每人只保留一份简历，新简历**解析成功后**才顶替旧的（失败不丢原简历）。
+  - `GET /api/resume/current`：我的当前简历（含解析正文），前端挂载即取回并自动带入生成上下文；没传过时返回 `204`。
+  - `DELETE /api/resume/current`：删除我的简历，任务行与解析产物 Markdown 一并清除（幂等，本就为空也是 `204`）。
   - `POST /api/knowledge/build` + `GET /api/knowledge/tasks/{id}/stream`（SSE）：后台线程执行知识库构建，实时推送进度。
   - `/api/auth/*`：注册/登录/刷新/登出/用户查询改删（JWT + refresh cookie 轮换，见交付说明）。
   - `GET /api/health`：健康检查。
@@ -407,7 +430,7 @@ Agent 通过 **意图识别** 自动选择处理路径：
 
 ## 运行测试
 
-**后端（pytest，364 passed）：**
+**后端（pytest，488 passed）：**
 
 ```bash
 # 运行全部后端测试
@@ -419,7 +442,7 @@ pytest tests/test_api/ -v          # FastAPI 路由/服务/SSE/任务管理
 pytest tests/test_auth/ -v         # 认证：security 纯函数 + auth 路由全链路
 ```
 
-**前端（Vitest，125 passed）：**
+**前端（Vitest，216 passed）：**
 
 ```bash
 cd frontend
@@ -439,18 +462,21 @@ npm run build                      # 附带 vue-tsc --noEmit 类型检查
 
 **Q: 项目经历素材不准确？**
 
-简历生成的项目素材优先来自 `data/knowledge_base/project_intros/` 下的项目介绍成品，直接编辑对应 `.md` 即时生效（无需任何构建命令）。若未放介绍文档，则降级用 `project_highlights/` 亮点文档的分块（编辑后重跑 `ingest-highlights` + `build-indexes` 增量生效）。
+简历生成的项目素材优先取项目文档的「**简历描述**」章节（编辑对应 `.md` 即时生效，无需构建）。若文档没有该章节，则降级使用全文——措辞会不如单独写的精炼段。
 
 **Q: 如何更新知识库？**
 
-放入新 PDF 或新项目亮点文档后重新运行 `python main.py build-all` 即可。各环节默认增量执行，只处理新增/更新过的文档；如需全量重建加 `--force`，删除过文档后加 `--prune` 清理孤儿索引。注意：删除 `project_highlights/` 里的文档后，需手动删除 `course_chunks/` 中对应的 `project-*.json` 再 `--prune`。
+放入新 PDF 或新项目文档后重新运行 `python main.py build-all` 即可。各环节默认增量执行，只处理新增/更新过的文档；如需全量重建加 `--force`，删除过文档后加 `--prune` 清理孤儿索引。
+
+Web 上传的项目文档走独立流程（Celery `project` 队列），无需手动跑命令；删除请走前端列表或 `DELETE /api/project/docs/{doc_id}`，会一并清理分块与索引。
 
 **Q: 支持哪些知识来源？**
 
 目前支持：
-- 课程 PDF（`data/knowledge_base/course_pdfs/`）
-- 项目介绍文档（`data/knowledge_base/project_intros/`，简历主路径，放入即用）
-- 项目亮点文档（`data/knowledge_base/project_highlights/`，知识问答与兜底，用提示词生成）
+- 课程 PDF（`data/knowledge_base/course_pdfs/`，**公共资源**）
+- 项目文档（`data/knowledge_base/projects/`，一个项目一份；Web 上传或 CLI 批量入库）
+  - 根目录下 = 公共示例（所有人可见）
+  - `u{user_id}/` = 该用户私有
 - 面试题资料（`data/knowledge_base/interview_qa/`，后续扩展）
 
 ---

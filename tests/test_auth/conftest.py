@@ -16,6 +16,14 @@ from src.api.app import create_app
 from src.database.database import Base, get_async_session
 
 
+@pytest.fixture(autouse=True)
+def _enable_register(monkeypatch):
+    """注册开关由部署环境的 .env 决定（生产默认关闭），但本目录测的就是注册链路，
+    必须在测试内显式打开，否则开发机 ALLOW_REGISTER=False 会让全部用例 403。
+    patch 字符串目标：auth.py 持有的是模块级 settings 单例，patch 新实例无效。"""
+    monkeypatch.setattr("src.api.routers.auth.settings.auth.allow_register", True)
+
+
 @pytest.fixture
 def client(tmp_path):
     dbfile = tmp_path / "auth_test.db"

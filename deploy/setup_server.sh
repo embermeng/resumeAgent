@@ -3,13 +3,14 @@
 # ResumeAgent 服务器端一键部署脚本
 #
 # 用法（在服务器上，代码已放到 /opt/ResumeAgent 后执行）：
-#   sudo bash deploy/setup_server.sh                    # 仅 HTTP，用 IP 访问
+#   sudo bash deploy/setup_server.sh                    # 用默认域名 resumeagent.icu + HTTPS
 #   sudo ENABLE_AUTH=1 bash deploy/setup_server.sh      # 再加一层访问口令（推荐）
-#   sudo DOMAIN=resume.example.com bash deploy/setup_server.sh   # 有域名时自动申请 HTTPS
+#   sudo DOMAIN= bash deploy/setup_server.sh            # 显式留空 = 只用 IP 访问，不申请证书
+#   sudo DOMAIN=resume.example.com bash deploy/setup_server.sh   # 换别的域名
 #
 # 可选环境变量：
 #   APP_DIR          代码目录，默认 /opt/ResumeAgent
-#   DOMAIN           域名或公网 IP；填域名时自动申请证书，填 IP 则只配 HTTP
+#   DOMAIN           域名或公网 IP；填域名时自动申请证书，填 IP 或留空则只配 HTTP
 #   ENABLE_AUTH      设为 1 时开启 Nginx 访问口令（账号 admin，执行中交互输入密码）
 #   SKIP_MIGRATIONS  设为 1 时跳过 alembic upgrade head（数据库已自行迁移时用）
 #
@@ -23,7 +24,8 @@
 set -euo pipefail
 
 APP_DIR="${APP_DIR:-/opt/ResumeAgent}"
-DOMAIN="${DOMAIN:-}"
+# 默认站点域名（腾讯云 DNSPod 已解析到本机）；换域名用 DOMAIN=xxx 覆盖，DOMAIN= 关掉 HTTPS
+DOMAIN="${DOMAIN-resumeagent.icu}"
 ENABLE_AUTH="${ENABLE_AUTH:-0}"
 SKIP_MIGRATIONS="${SKIP_MIGRATIONS:-0}"
 
@@ -138,6 +140,8 @@ if ! command -v nginx >/dev/null 2>&1; then
     systemctl enable --now nginx
 fi
 
+is_ip() { [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; }
+
 if [ -z "$DOMAIN" ]; then
     SERVER_NAME="$(curl -fsS --max-time 5 ifconfig.me 2>/dev/null || true)"
     [ -z "$SERVER_NAME" ] && SERVER_NAME="_"
@@ -146,7 +150,18 @@ else
     SERVER_NAME="$DOMAIN"
 fi
 
-sed "s/your-domain.com/$SERVER_NAME/" "$APP_DIR/deploy/nginx.conf" > /etc/nginx/conf.d/resume-agent.conf
+# www 子域只在「确实是域名 + DNS 里有记录」时才一起配，否则证书会连 www 一起签失败
+ALT_HOST=""
+if [ -n "$DOMAIN" ] && ! is_ip "$DOMAIN" && [[ "$DOMAIN" != www.* ]] && getent hosts "www.$DOMAIN" >/dev/null 2>&1; then
+    ALT_HOST="www.$DOMAIN"
+    log "检测到 www.$DOMAIN 已解析，server_name 与证书一并带上"
+fi
+
+# /g 是必需的：模板里 server_name 那行有裸域名和 www 两个占位符
+sed "s/your-domain.com/$SERVER_NAME/g" "$APP_DIR/deploy/nginx.conf" > /etc/nginx/conf.d/resume-agent.conf
+if [ -z "$ALT_HOST" ]; then
+    sed -i "s|^    server_name .*$|    server_name $SERVER_NAME;|" /etc/nginx/conf.d/resume-agent.conf
+fi
 
 # 访问口令：账号固定 admin，密码执行时输入
 if [ "$ENABLE_AUTH" = "1" ]; then
@@ -168,20 +183,25 @@ log "Nginx 已加载配置"
 
 # ---------------------------------------------------------------- 4. HTTPS
 # 仅在 DOMAIN 是域名（非 IP）时申请证书
-if [ -n "$DOMAIN" ] && ! [[ "$DOMAIN" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-    log "为 $DOMAIN 申请 HTTPS 证书"
+if [ -n "$DOMAIN" ] && ! is_ip "$DOMAIN"; then
+    if [ -n "$ALT_HOST" ]; then
+        CERT_HOSTS=(-d "$DOMAIN" -d "$ALT_HOST")
+    else
+        CERT_HOSTS=(-d "$DOMAIN")
+    fi
+    log "为 ${CERT_HOSTS[*]} 申请 HTTPS 证书"
     command -v certbot >/dev/null 2>&1 || apt-get install -y certbot python3-certbot-nginx
-    certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos --register-unsafely-without-email \
-        || warn "证书申请失败（域名未解析到本机？80/443 未放通？）。稍后可手动执行：certbot --nginx -d $DOMAIN"
+    certbot --nginx "${CERT_HOSTS[@]}" --non-interactive --agree-tos --register-unsafely-without-email \
+        || warn "证书申请失败（域名未解析到本机？80/443 未放通？未完成备案？）。稍后可手动执行：certbot --nginx ${CERT_HOSTS[*]}"
 fi
 
 # ---------------------------------------------------------------- 5. 结果
 echo
 log "部署完成"
-if [ -n "$DOMAIN" ] && ! [[ "$DOMAIN" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+if [ -n "$DOMAIN" ] && ! is_ip "$DOMAIN"; then
     echo "  访问地址：https://$DOMAIN"
 else
-    echo "  访问地址：http://124.222.88.64 （若脚本取到的 IP 不对，以你的公网 IP 为准）"
+    echo "  访问地址：http://$SERVER_NAME （若脚本取到的 IP 不对，以你的公网 IP 为准）"
 fi
 echo "  查看日志：cd $APP_DIR && docker compose logs -f --tail 200（含 redis 与两个 celery worker）"
 echo "  重启服务：cd $APP_DIR && docker compose restart"

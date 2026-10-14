@@ -24,8 +24,9 @@ celery_app.conf.update(
     include=["src.worker.tasks"],
     task_routes={
         "resumeagent.parse_resume": {"queue": "resume"},
-        # Step B 才实现,先占位
         "resumeagent.knowledge_build": {"queue": "knowledge"},
+        # 项目文档上传入库:独立队列,避免排在 knowledge 的长任务(build-all)后面
+        "resumeagent.ingest_project": {"queue": "project"},
     },
     task_acks_late=True,
 )

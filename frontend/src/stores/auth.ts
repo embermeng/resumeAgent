@@ -19,6 +19,13 @@ export const useAuthStore = defineStore('auth', {
   }),
   getters: {
     isAuthenticated: (state): boolean => state.user !== null,
+    /**
+     * 管理员。后端对管理端操作(如 POST /knowledge/build)同样校验,
+     * 这里只是入口显隐——不是安全边界,绕过前端直接调接口仍会被 403。
+     */
+    isSuperuser(state): boolean {
+      return state.user?.is_superuser === true
+    },
   },
   actions: {
     /** 拉取当前用户信息(需已有 access token) */

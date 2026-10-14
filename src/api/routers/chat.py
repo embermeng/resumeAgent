@@ -70,6 +70,8 @@ def chat(
         buf, intent = [], None
         ttl = settings.redis.chat_stream_buffer_ttl
         try:
+            # 上传/删除后进程内检索器快照可能过期，开流前按版本号懒同步一次
+            svc.agent.tools.sync_project_docs(current_user.id)
             if conv_id is not None:
                 save_conv_mapping(stream_id, conv_id, ttl)
                 data = {"conversation_id": conv_id, "stream_id": stream_id}
@@ -78,7 +80,11 @@ def chat(
                 seq += 1
                 yield sse_format("conversation", data, seq=cur)
             # run_stream 是同步生成器,StreamingResponse 会在线程池迭代,不阻塞事件循环
-            for event in svc.run_stream(req.prompt, existing_resume=req.existing_resume):
+            for event in svc.run_stream(
+                req.prompt,
+                existing_resume=req.existing_resume,
+                user_id=current_user.id,
+            ):
                 event_type = event.get("type")
                 data = {k: v for k, v in event.items() if k != "type"}
                 if event_type == "intent":
@@ -112,7 +118,6 @@ def chat_reconnect(stream_id: str, request: Request, current_user: CurrentUser):
     conv_id = get_sync_client().get(conv_key(stream_id))
     if conv_id is None or not check_conversation(int(conv_id), current_user.id):
         raise HTTPException(status_code=404, detail="stream not found")
-    after = None
     raw = request.headers.get("Last-Event-ID")
     if raw is None:
         raw = request.query_params.get("after", -1)   # 头优先,没有才用 query

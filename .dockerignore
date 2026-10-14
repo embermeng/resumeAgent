@@ -28,6 +28,10 @@ docs
 deploy
 *.md
 
+# 例外：项目文档模板是运行时资产（用户下载源 + LLM 标准格式 + 入库校验基准），
+# 被上面的 *.md 排掉会导致镜像里 load_template() 读不到文件，上传全部失败。
+!src/knowledge/templates/*.md
+
 # 大体积原始数据：课程 PDF 不进镜像（云端不解析）
 data/knowledge_base/course_pdfs
 data/knowledge_base/interview_qa

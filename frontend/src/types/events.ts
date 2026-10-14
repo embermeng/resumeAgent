@@ -13,7 +13,7 @@ export type TaskKind =
   | 'extract-summaries'
   | 'split-chunks'
   | 'build-indexes'
-  | 'ingest-highlights'
+  | 'ingest-projects'
 
 export type TaskState = 'pending' | 'running' | 'success' | 'failed'
 
@@ -80,6 +80,19 @@ export interface ResumeParseStatus {
   finished_at?: number
 }
 
+/**
+ * GET /api/resume/current(契约 4.5b):我当前的简历。每个用户只有一份,
+ * content 直接随响应下发,前端挂载即自动带入生成上下文(无取消入口)。
+ * 后端无简历时返回 204,前端拿到 undefined。
+ */
+export interface ResumeCurrent {
+  filename?: string
+  created_at: number
+  finished_at?: number
+  /** 解析出的 Markdown;产物文件丢失时为 null(此时只回显、不带入上下文) */
+  content?: string | null
+}
+
 export interface SupportedExtensions {
   extensions: string[]
 }
@@ -113,6 +126,104 @@ export interface TaskStatus {
 export interface TaskList {
   tasks: TaskStatus[]
   total: number
+}
+
+/* ============================================================
+ * 项目文档(契约:POST/GET /api/project/*)
+ * 与后端 src/api/schemas_api.py 的 ProjectUploadAck/ProjectUploadStatus/
+ * ProjectDocOut/ProjectDocList 一一对应。
+ * ========================================================== */
+
+/** POST /api/project/upload 回执:提交后台入库任务后返回(202) */
+export interface ProjectUploadAck {
+  task_id: string
+  status: TaskState
+}
+
+/** GET /api/project/upload/{task_id} 快照(轮询兜底) */
+export interface ProjectUploadStatus {
+  task_id: string
+  status: TaskState
+  stage?: string
+  percent?: number
+  message?: string
+  filename?: string
+  error?: string
+  created_at: number
+  finished_at?: number
+}
+
+/** GET /api/project/docs 列表项 */
+export interface ProjectDocOut {
+  doc_id: string
+  project_name: string
+  file_name: string
+  tags: string[]
+  /** false 时简历生成降级为全文引用,UI 应给出提示 */
+  has_resume_section: boolean
+  /** true 表示公共素材(所有用户可见),不可删除 */
+  is_public: boolean
+  created_at: number
+  updated_at: number
+}
+
+/** GET /api/project/docs 列表 */
+export interface ProjectDocList {
+  docs: ProjectDocOut[]
+  total: number
+  /** 该用户文档数上限(配额) */
+  max_docs: number
+}
+
+/**
+ * POST /api/project/preprocess 响应：上传后的预处理结果。
+ * 前端据此弹预览——展示系统整理后的文本，用户确认（可再编辑）后才入库。
+ */
+export interface ProjectPreprocessOut {
+  preview_id: string
+  project_name: string
+  file_name: string
+  /** 用户原始文本（清洗后） */
+  original_text: string
+  /** 整理后的文本（最终采用，保证含一级标题） */
+  normalized_text: string
+  /** 是否经过大模型整理 */
+  normalized: boolean
+  /** 未整理/回退的原因 */
+  reason: string
+  has_resume_section: boolean
+}
+
+/** POST /api/project/confirm 请求体 */
+export interface ProjectConfirmIn {
+  preview_id: string
+  /** 用户在预览中编辑后的文本；不传则用整理结果 */
+  text?: string
+}
+
+/** POST /api/project/docs/batch-delete 请求体(1~100 个,后端自动去重) */
+export interface ProjectDocBatchDeleteIn {
+  doc_ids: string[]
+}
+
+/**
+ * GET /api/project/template 响应:标准模板。
+ * 内容与入库校验基准同源,照它写的文档能通过校验直接入库,不被大模型改写。
+ */
+export interface ProjectTemplateOut {
+  /** 建议的下载文件名(后端给定,前端不拼) */
+  file_name: string
+  /** 模板 Markdown 原文 */
+  content: string
+}
+
+/**
+ * POST /api/project/docs/batch-delete 结果。
+ * 越权/不存在的 id 不报错而是回显在 not_found_ids(与单条删除"不泄露存在性"一致)。
+ */
+export interface ProjectDocBatchDeleteResult {
+  deleted_ids: string[]
+  not_found_ids: string[]
 }
 
 /** 会话摘要(GET /api/conversations 列表项,契约 4.11) */
@@ -178,6 +289,8 @@ export interface UserPublic {
 /** 用户完整视图(register/me/patch 响应) */
 export interface UserPrivate extends UserPublic {
   email: string
+  /** 管理员标记;前端据此决定是否展示管理端入口 */
+  is_superuser?: boolean
 }
 
 /** PATCH /api/auth/{id} 请求体(字段均可省略,只改提供的) */

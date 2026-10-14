@@ -41,10 +41,10 @@ class TestCliDelegation:
                 bm25=True, vector=False, force=True, prune=True
             )
 
-    def test_ingest_highlights(self):
+    def test_ingest_projects(self):
         with patch("main.get_config"), patch(_SVC) as MockSvc:
-            main.cmd_ingest_highlights(_args(force=False))
-            MockSvc.return_value.ingest_highlights.assert_called_once_with(force=False)
+            main.cmd_ingest_projects(_args(force=False))
+            MockSvc.return_value.ingest_project_docs.assert_called_once_with(force=False)
 
     def test_build_all_passes_params_and_progress(self):
         with patch("main.get_config"), patch(_SVC) as MockSvc:

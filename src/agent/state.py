@@ -9,6 +9,7 @@ class AgentState(TypedDict):
     """Agent状态，用于LangGraph图节点间传递"""
     messages: List[BaseMessage]           # 对话消息列表
     user_input: str                       # 用户原始输入
+    user_id: Optional[int]                # 当前用户ID（项目素材可见性隔离；None=仅公共素材）
     intent: str                           # 意图分类：quick_response / deep_thinking / chitchat
     extracted_entities: Dict[str, Any]    # 意图识别时提取的实体
     has_job_requirement: bool             # 是否有岗位要求

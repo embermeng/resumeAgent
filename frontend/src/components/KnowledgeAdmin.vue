@@ -19,7 +19,7 @@ const TASKS: { kind: TaskKind; label: string; primary?: boolean }[] = [
   { kind: 'parse-pdfs', label: '解析 PDF' },
   { kind: 'extract-summaries', label: '提取课程摘要' },
   { kind: 'split-chunks', label: '文本分块' },
-  { kind: 'ingest-highlights', label: '项目亮点入库' },
+  { kind: 'ingest-projects', label: '项目文档入库' },
   { kind: 'build-indexes', label: '构建索引' },
 ]
 

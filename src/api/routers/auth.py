@@ -1,3 +1,5 @@
+import logging
+import shutil
 from datetime import timedelta, UTC, datetime
 from typing import Annotated
 
@@ -18,6 +20,8 @@ from src.auth.security import (
 from src.config import get_config
 from src.database.database import get_async_session
 from src.api.schemas_api import Token, UserCreate, UserLoginReq, UserPrivate, UserPublic, UserUpdate
+
+_log = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -323,6 +327,26 @@ async def delete_user(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="User not found",
         )
+
+    # 删号联动清理项目文档：必须在删用户**之前**取回列表，
+    # DB 行被级联删掉后就没有 doc_id 可用于定位和清理磁盘产物了。
+    # 清理失败不阻断删号（否则用户永远删不掉账号），残留由 prune 兜底。
+    try:
+        from src.api.services.project_service import purge_disk_artifacts
+        from src.database.utils.project_docs import delete_user_project_docs
+        from src.config import get_config
+
+        docs = delete_user_project_docs(user_id)
+        for doc in docs:
+            purge_disk_artifacts(doc.source_path, doc.doc_id)
+
+        user_dir = get_config().paths.user_projects_dir(user_id)
+        if user_dir.exists():
+            shutil.rmtree(user_dir, ignore_errors=True)  # 兜底：未入库/入库失败的残留
+        if docs:
+            _log.info(f"删号清理: 已移除用户 {user_id} 的 {len(docs)} 份项目文档")
+    except Exception as e:
+        _log.error(f"删号时清理项目文档失败(user_id={user_id}): {e}")
 
     await db.delete(user)
     await db.commit()

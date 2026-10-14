@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
-import { ElMessage } from 'element-plus'
-import { Top } from '@element-plus/icons-vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { Delete, Top } from '@element-plus/icons-vue'
 import { useChatStore } from '@/stores/chat'
 import * as api from '@/api/client'
 import { renderMarkdown } from '@/utils/markdown'
@@ -10,7 +10,15 @@ import ChatMessage from '@/components/ChatMessage.vue'
 import ResumeUploader from '@/components/ResumeUploader.vue'
 
 const store = useChatStore()
-const { messages, streaming, reconnecting, existingResume, recoverableDraft } = storeToRefs(store)
+const {
+  messages,
+  streaming,
+  reconnecting,
+  existingResumeName,
+  existingResumeTime,
+  recoverableDraft,
+  hasResume,
+} = storeToRefs(store)
 
 const input = ref('')
 const scroller = ref<HTMLElement | null>(null)
@@ -27,6 +35,8 @@ const SUGGESTIONS = [
 ]
 
 onMounted(async () => {
+  // 简历存在服务端且每人一份:挂载即取回并自动带入上下文(同标签页刷新先走 sessionStorage)
+  void store.loadCurrentResume()
   try {
     const r = await api.getSupportedExtensions()
     if (r?.extensions?.length) extensions.value = r.extensions
@@ -60,7 +70,37 @@ function onRetry(id: string) {
 }
 
 function onParsed(payload: { filename: string; content: string }) {
-  store.setExistingResume(payload.content)
+  // 正文已在手,先本地生效让下一句立刻带上;再用服务端真值补齐解析时间等元信息
+  store.setExistingResume(payload.content, payload.filename)
+  void store.loadCurrentResume()
+}
+
+const removingResume = ref(false)
+
+/** epoch 秒 → 本地时间串,与知识库任务列表口径一致 */
+function formatResumeTime(epoch: number): string {
+  return new Date(epoch * 1000).toLocaleString()
+}
+
+/**
+ * 删除我的简历。后端连解析产物 Markdown 一起删、不可恢复,且删掉后
+ * 生成不再带个人经历底稿,所以先确认再动手(交互与项目文档面板一致)。
+ */
+async function onRemoveResume(): Promise<void> {
+  try {
+    await ElMessageBox.confirm(
+      `确定删除「${existingResumeName.value || '当前简历'}」?解析结果会一并删除,不可恢复;之后生成简历将不再基于你的旧简历。`,
+      '删除确认',
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
+    )
+  } catch {
+    return // 用户取消
+  }
+  removingResume.value = true
+  const ok = await store.removeResume()
+  removingResume.value = false
+  if (ok) ElMessage.success('已删除')
+  else ElMessage.error('删除失败,请稍后重试')
 }
 
 function onUploadError(message: string) {
@@ -146,11 +186,6 @@ function onDownload(markdown: string) {
 
       <div class="chat-column">
         <div class="composer">
-          <div v-if="existingResume" class="resume-chip">
-            <el-tag type="success" closable data-test="resume-chip" @close="store.clearExistingResume()">
-              已附加简历(深思路径将基于它增强生成)
-            </el-tag>
-          </div>
           <div class="composer-box">
             <el-input
               v-model="input"
@@ -196,8 +231,36 @@ function onDownload(markdown: string) {
 
     <aside class="chat-side">
       <h3 class="side-title">📎 已有简历</h3>
-      <ResumeUploader :extensions="extensions" @parsed="onParsed" @error="onUploadError" />
-      <p class="tip">上传简历后,深思路径生成时会基于它增强。</p>
+      <ResumeUploader
+        :extensions="extensions"
+        :has-resume="hasResume"
+        @parsed="onParsed"
+        @error="onUploadError"
+      />
+      <p class="tip">每人只保留一份简历,生成时自动带入上下文;重新上传会顶替当前这份。</p>
+
+      <!-- 服务端只存本人一份简历:这里回显文件名与解析时间,删除即清空上下文 -->
+      <div v-if="hasResume" class="resume-current" data-test="resume-current">
+        <div class="resume-main">
+          <span class="resume-name" :title="existingResumeName">
+            {{ existingResumeName || '当前简历' }}
+          </span>
+          <span v-if="existingResumeTime !== null" class="resume-time">
+            {{ formatResumeTime(existingResumeTime) }}
+          </span>
+        </div>
+        <el-button
+          link
+          type="danger"
+          size="small"
+          :loading="removingResume"
+          data-test="resume-delete"
+          @click="onRemoveResume"
+        >
+          <el-icon><Delete /></el-icon>
+          删除
+        </el-button>
+      </div>
     </aside>
 
     <el-dialog v-model="previewVisible" title="简历预览" width="70%" top="6vh">
@@ -355,9 +418,6 @@ function onDownload(markdown: string) {
 .composer {
   padding-top: 4px;
 }
-.resume-chip {
-  margin-bottom: 8px;
-}
 .composer-box {
   background: var(--el-bg-color);
   border-radius: 12px;
@@ -434,6 +494,34 @@ function onDownload(markdown: string) {
   font-size: 12px;
   color: var(--el-text-color-secondary);
   line-height: 1.6;
+}
+/* 单份简历卡片:文件名可能很长,省略号收尾(完整名在 title 里) */
+.resume-current {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+  padding: 6px 8px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 8px;
+}
+.resume-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.resume-name {
+  font-size: 12px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.resume-time {
+  font-size: 11px;
+  color: var(--el-text-color-secondary);
 }
 .preview-body {
   max-height: 66vh;

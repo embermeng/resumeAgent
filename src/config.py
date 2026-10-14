@@ -29,14 +29,17 @@ class PathConfig:
         return self.knowledge_base_dir / "course_pdfs"
 
     @property
-    def project_highlights_dir(self) -> Path:
-        """项目亮点文档目录（用户用提示词生成的项目亮点README，手动放入/网页上传）"""
-        return self.knowledge_base_dir / "project_highlights"
+    def projects_dir(self) -> Path:
+        """
+        项目文档目录（合并原 project_highlights + project_intros）。
+        根目录下直接放的是公共素材（user_id=NULL，所有人可见）；
+        u{user_id}/ 子目录是该用户的私有文档。
+        """
+        return self.knowledge_base_dir / "projects"
 
-    @property
-    def project_intros_dir(self) -> Path:
-        """项目介绍文档目录（简历措辞成品，一个项目一份，生成简历时直接引用，不入库不向量化）"""
-        return self.knowledge_base_dir / "project_intros"
+    def user_projects_dir(self, user_id: int) -> Path:
+        """指定用户的私有项目文档目录"""
+        return self.projects_dir / f"u{user_id}"
 
     @property
     def interview_qa_dir(self) -> Path:
@@ -80,12 +83,16 @@ class PathConfig:
     def resume_uploads_dir(self) -> Path:
         return self.processed_dir / "resume_uploads"
 
+    @property
+    def project_previews_dir(self) -> Path:
+        """项目文档预处理暂存目录（预览确认前的中间产物）"""
+        return self.processed_dir / "project_previews"
+
     def ensure_dirs(self):
         """确保所有数据目录存在"""
         for dir_path in [
             self.course_pdfs_dir,
-            self.project_highlights_dir,
-            self.project_intros_dir,
+            self.projects_dir,
             self.interview_qa_dir,
             self.course_chunks_dir,
             self.interview_chunks_dir,
@@ -93,6 +100,7 @@ class PathConfig:
             self.vector_dbs_dir,
             self.bm25_dbs_dir,
             self.resume_uploads_dir,
+            self.project_previews_dir,
         ]:
             dir_path.mkdir(parents=True, exist_ok=True)
 
@@ -152,8 +160,19 @@ class AuthConfig:
     algorithm: str = "HS256"
     access_token_expire_minutes: int = 60
     refresh_token_expire_minutes: int = 7 * 24 * 60
-    cookie_secure: bool = False
-    allow_register: bool = False
+    # HTTPS 部署（正式域名 + certbot 证书）时置 1，让 access/refresh cookie 只在加密连接下发送
+    cookie_secure: bool = os.getenv("COOKIE_SECURE", "false").strip().lower() in (
+        "1", "true", "yes", "on")
+    # 默认关闭：注册即可上传项目文档、烧 embedding 额度，必须由部署方显式打开
+    allow_register: bool = os.getenv("ALLOW_REGISTER", "false").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
+@dataclass
+class ProjectDocConfig:
+    """项目文档上传约束（embedding 是真金白银，必须有闸门）"""
+    max_file_size: int = int(os.getenv("PROJECT_DOC_MAX_FILE_SIZE", 200 * 1024))
+    max_docs_per_user: int = int(os.getenv("PROJECT_DOC_MAX_DOCS_PER_USER", 30))
 
 
 @dataclass
@@ -191,7 +210,9 @@ class RedisConfig:
     cache_ttl: int = int(os.getenv("REDIS_CACHE_TTL", "3600"))          # 基础 TTL 秒
     cache_ttl_jitter: int = int(os.getenv("REDIS_CACHE_TTL_JITTER", "300"))  # 雪崩抖动上限
     empty_ttl: int = int(os.getenv("REDIS_CACHE_EMPTY_TTL", "60"))      # 空结果短 TTL(防穿透)
-    key_prefix: str = os.getenv("REDIS_CACHE_PREFIX", "resumeagent:retrieval:v1:")
+    # v2：检索开始按用户可见性下传 doc_ids 白名单。v1 时期部分路径 doc_ids=None，
+    # 缓存 key 与用户无关，可能残留跨用户可见的旧结果——升版本号整体作废，不靠 TTL 等它过期
+    key_prefix: str = os.getenv("REDIS_CACHE_PREFIX", "resumeagent:retrieval:v2:")
     chat_stream_buffer_ttl: int = int(os.getenv("REDIS_CHAT_STREAM_BUFFER_TTL", "3600"))
 
 
@@ -205,6 +226,7 @@ class AppConfig:
     retrieval: RetrievalConfig = field(default_factory=RetrievalConfig)
     database: DatabaseConfig = field(default_factory=DatabaseConfig)
     auth: AuthConfig = field(default_factory=AuthConfig)
+    project_doc: ProjectDocConfig = field(default_factory=ProjectDocConfig)
     semaphore: SemaphoreConfig = field(default_factory=SemaphoreConfig)
     mineru: MinerUConfig = field(default_factory=MinerUConfig)
     redis: RedisConfig = field(default_factory=RedisConfig)

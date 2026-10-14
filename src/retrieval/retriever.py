@@ -53,6 +53,18 @@ class BM25Retriever:
         self._index_cache = {}
         self._doc_cache = {}
 
+    def invalidate(self, doc_ids: List[str]) -> int:
+        """
+        丢弃指定文档的索引/分块缓存，下次检索时从磁盘重新加载。
+        覆盖上传与删除后必须调用，否则会一直命中旧内容。
+        """
+        n = 0
+        for doc_id in doc_ids or []:
+            if self._doc_cache.pop(doc_id, None) is not None:
+                n += 1
+            self._index_cache.pop(doc_id, None)
+        return n
+
     def _load_document(self, doc_id: str) -> dict:
         """加载指定doc_id的分块文档（带缓存）"""
         if doc_id in self._doc_cache:
@@ -176,6 +188,62 @@ class VectorRetriever:
         from src.api_client import APIProcessor
         self._embedding_api = APIProcessor(provider=embedding_provider)
         self.all_dbs = self._load_dbs()
+
+    def refresh(
+        self, doc_ids: List[str], removed_ids: List[str] = None
+    ) -> Dict[str, int]:
+        """
+        增量刷新 all_dbs 中的项目文档条目（不重建全量）。
+
+        all_dbs 是构造时的内存快照，新入库/覆盖/删除的文档不会自动出现在这里，
+        上传后必须调用本方法才能被检索到。
+
+        参数:
+            doc_ids: 需要新增/重载的文档（磁盘产物缺失的跳过）
+            removed_ids: 需要**显式**从快照移除的文档（已删除）
+
+        移除只认 removed_ids，绝不按"不在 doc_ids 里"来驱逐：doc_ids 是**单个用户**
+        的可见白名单，而 all_dbs 是进程级共享快照——按白名单驱逐会把其他用户的内存索引
+        一起删掉，且对方的版本比对看不出变化不会重刷，等于静默失去向量检索。
+        内存里多留他人的条目不构成泄露：retrieve 每次都按调用方下传的 doc_ids 过滤。
+
+        返回 {"added": 新增, "replaced": 覆盖, "removed": 移除}
+        """
+        keep = list(doc_ids or [])
+        drop = set(removed_ids or [])
+        stats = {"added": 0, "replaced": 0, "removed": 0}
+
+        # 1) 移除显式删除的文档
+        if drop:
+            before = len(self.all_dbs)
+            self.all_dbs = [e for e in self.all_dbs if e["doc_id"] not in drop]
+            stats["removed"] = before - len(self.all_dbs)
+
+        # 2) 新增/覆盖
+        present = {e["doc_id"]: i for i, e in enumerate(self.all_dbs)}
+        for doc_id in keep:
+            doc_path = self.documents_dir / f"{doc_id}.json"
+            faiss_path = self.vector_db_dir / f"{doc_id}.faiss"
+            if not (doc_path.exists() and faiss_path.exists()):
+                continue
+            try:
+                with open(doc_path, "r", encoding="utf-8") as f:
+                    document = json.load(f)
+                vector_db = read_faiss_index(faiss_path)
+            except Exception as e:
+                _log.error(f"刷新向量库失败 {doc_id}: {e}")
+                continue
+
+            entry = {"doc_id": doc_id, "vector_db": vector_db, "document": document}
+            if doc_id in present:
+                self.all_dbs[present[doc_id]] = entry
+                stats["replaced"] += 1
+            else:
+                self.all_dbs.append(entry)
+                stats["added"] += 1
+                present[doc_id] = len(self.all_dbs) - 1
+
+        return stats
 
     def _load_dbs(self) -> List[Dict]:
         """加载所有向量库和文档映射"""

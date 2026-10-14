@@ -2,10 +2,26 @@
 
 > 完整说明见 [`../docs/部署方案.md`](../docs/部署方案.md)
 > 当前环境：腾讯云轻量 **Ubuntu 22.04 / 2核4G**，公网 IP `124.222.88.64`，登录用户 `ubuntu`
+> 域名：`resumeagent.icu`（腾讯云注册，DNS 托管在 DNSPod）
 
 ---
 
 ## 一、首次部署
+
+### 0. 域名解析（一次性，在腾讯云控制台点几下）
+
+`我的域名 → resumeagent.icu → 解析` 添加记录：
+
+| 主机记录 | 类型 | 记录值 | 说明 |
+|---|---|---|---|
+| `@` | A | `124.222.88.64` | 裸域名，必填 ✅ 已加 |
+| `www` | A | `124.222.88.64` | 可选 ✅ 已加；脚本检测到它有解析，就会一起写进 `server_name` 和证书 |
+
+生效验证（本地 PowerShell）：`Resolve-DnsName resumeagent.icu` 应返回服务器 IP。
+
+> 部署脚本按「www 记录是否存在」决定是否带上这个别名，所以换别的域名时没有 www 记录也不会导致证书申请失败。
+
+> **备案提醒**：域名解析到中国大陆服务器并用 80/443 对外访问，前提是域名已完成 ICP 备案，否则腾讯云会拦截（表现为连接被重置或跳到备案提示页）。`.icu` 后缀能否备案以腾讯云备案控制台的校验结果为准；备案下来前可以先用非标端口（如 `https://resumeagent.icu:8443`）临时访问验证功能。
 
 ### 1. 本地打包上传（Windows PowerShell）
 
@@ -41,10 +57,19 @@ DATABASE_URL=postgresql+psycopg://user:pwd@<host>:5432/resumeagent
 REDIS_URL=redis://localhost:6379/0 # Docker 模式由 compose 覆盖为 redis://redis:6379/0
 ```
 
+可选（不设则用代码默认值）：
+
+```ini
+ALLOW_REGISTER=false               # 注册开关，代码默认 false；开放注册才置 true
+COOKIE_SECURE=true                 # 走 https://resumeagent.icu 时打开；用 IP+HTTP 访问时必须留 false
+```
+
+> 注册即等于可上传项目文档、消耗 embedding 额度。生产默认关闭，需要开放时显式改 `true` 并重跑 `deploy/update.sh backend`。
+
 ### 2. 控制台放行端口
 
-腾讯云轻量 → 防火墙 → 添加规则：`HTTP 80`、`HTTPS 443`（来源 `0.0.0.0/0`）。**不做这步后面全白搭。**
-`8000`（API）与 `6379`（Redis）**不要**对外，只走 Nginx。
+腾讯云轻量 → 防火墙：`HTTP 80`、`HTTPS 443` 允许（来源 `0.0.0.0/0`）。**不做这步后面全白搭**，你当前已配好 ✅
+`5432` 保持**拒绝** ✅；`8000`（API）与 `6379`（Redis）也不要加放行规则，只走 Nginx。
 
 ### 3. 服务器部署
 
@@ -65,7 +90,48 @@ sudo ENABLE_AUTH=1 bash deploy/setup_server_nodocker.sh
 
 `ENABLE_AUTH=1` 会让你设一个访问密码（账号 `admin`）。项目自带**多用户 JWT 注册登录**，但仍建议再加这层口令，避免陌生人随意注册。
 
-访问：`http://124.222.88.64`
+**域名已内置为默认值**：两个脚本的 `DOMAIN` 默认就是 `resumeagent.icu`，会写进 Nginx `server_name` 并自动跑 certbot 申请 HTTPS 证书。
+
+```bash
+sudo DOMAIN=other.example.com bash deploy/setup_server.sh   # 换域名
+sudo DOMAIN= bash deploy/setup_server.sh                    # 只要 IP + HTTP，不申请证书
+```
+
+访问：`https://resumeagent.icu`（证书申请失败时先回退 `http://124.222.88.64` 排查）
+
+### 3.5 已经用 IP 跑起来了，只想切到域名
+
+不必重跑 `setup_server.sh`（那会重新构建镜像，10~20 分钟）。DNS 生效后在服务器执行：
+
+> 若要用上本次改动的 `docker-compose.yml`，先按第三节把新包解压到 `/opt/ResumeAgent`；纯切域名+证书不依赖新包。
+
+```bash
+cd /opt/ResumeAgent
+# 注意用 tee：sudo 重定向到 /etc/nginx 会被普通用户权限挡住
+# /g 不能少：模板 server_name 那行有裸域名和 www 两个占位符
+sudo sed "s/your-domain.com/resumeagent.icu/g" deploy/nginx.conf | sudo tee /etc/nginx/conf.d/resume-agent.conf > /dev/null
+sudo rm -f /etc/nginx/sites-enabled/default && sudo nginx -t && sudo systemctl reload nginx
+sudo apt install -y certbot python3-certbot-nginx
+sudo certbot --nginx -d resumeagent.icu -d www.resumeagent.icu   # 自动加 443 server 块 + 80 跳转
+```
+
+改 `.env`（加 `COOKIE_SECURE=true`）和 `docker-compose.yml`（`CORS_ORIGINS`）只是换环境变量，**不需要重建镜像**：
+
+```bash
+sudo docker compose up -d          # Docker 模式：按新配置重建容器
+sudo systemctl restart resume-agent   # 免 Docker 模式
+```
+
+### 4. 证书续期
+
+certbot 装好后自带 systemd timer 自动续期，部署完确认一次即可：
+
+```bash
+sudo certbot certificates                 # 看域名与到期时间
+sudo certbot renew --dry-run              # 演练续期，报错说明 80 端口或解析有问题
+```
+
+> certbot 会改写 `/etc/nginx/conf.d/resume-agent.conf`（加 443 server 块 + 80 跳转）。重跑 `setup_server*.sh` 会覆盖成 HTTP 模板并重新申请证书，属正常行为；日常更新用 `deploy/update.sh`，不会碰 Nginx。
 
 ---
 
@@ -166,6 +232,10 @@ sudo bash deploy/update.sh data                                              # �
 | `docker pull` 超时 `dial tcp ...:443 i/o timeout` | 出站访问 Docker Hub 被阻断，**不是**入站防火墙。配加速器：见下；不行就换 `setup_server_nodocker.sh` |
 | `permission denied ... docker.sock` | 当前用户不在 docker 组：`sudo usermod -aG docker ubuntu && newgrp docker`，或命令前加 `sudo` |
 | 浏览器打不开 | 99% 是腾讯云防火墙没放行 80；服务器内 `curl http://127.0.0.1:8000/api/health` 能通就说明后端没问题 |
+| 域名访问被重置/跳备案提示页，IP 访问正常 | 域名未完成 ICP 备案，大陆服务器 80/443 被腾讯云拦截。先备案，临时可换非标端口 |
+| certbot 报 `DNS problem: nxdomain` | A 记录还没生效或主机记录填错，`Resolve-DnsName resumeagent.icu` 先确认解析到了服务器 IP |
+| certbot 报 `Timeout during connect` | 80 端口没放通，或 Nginx 未监听；`curl -I http://resumeagent.icu` 应有响应 |
+| 开了 `COOKIE_SECURE=true` 后登录态秒丢 | 正在用 HTTP/IP 访问，Secure cookie 不会被发送；改回 false 或改用 https 域名 |
 | 502 Bad Gateway | `docker compose logs --tail 100` 或 `journalctl -u resume-agent -n 100` |
 | 启动即 `RuntimeError: SECRET_KEY not set` | `.env` 缺 `SECRET_KEY`，补一个随机串后 `sudo bash deploy/update.sh backend` |
 | 注册/登录 500，日志报数据库连接 | `DATABASE_URL` 不对或数据库不可达；Docker 模式别写 `localhost`；确认库已建、账号有权限 |

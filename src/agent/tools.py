@@ -11,7 +11,11 @@ from typing import Optional, Dict, List, Tuple
 from src.api_client import APIProcessor
 from src.retrieval.retriever import BM25Retriever, VectorRetriever, HybridRetriever
 from src.config import get_config
-from src.knowledge.intro_selector import IntroSelector, PRIORITY_TAG
+from src.knowledge.project_doc import ProjectDocScanner, PRIORITY_TAG
+from src.retrieval.visibility import (
+    visible_project_doc_ids,
+    visible_tagged_project_ids,
+)
 from src.schemas.knowledge import SelectionPlan
 from src.schemas.project import IntroSelectionPlan
 from src.prompts.knowledge_prompts import (
@@ -75,7 +79,9 @@ class AgentTools:
         self._vector_retriever = None
         self._bm25_retriever = None
         self._hybrid_retriever = None
-        self._intro_selector = None
+        self._project_scanner = None
+        # user_id -> {doc_id: updated_at} 快照，用于懒刷新判废
+        self._docs_snapshot = {}
         # 共享持久API客户端：连接池保持TLS长连接，避免每次LLM调用新建连接
         self._api = APIProcessor(provider=self.config.llm.provider)
 
@@ -112,28 +118,93 @@ class AgentTools:
         return self._hybrid_retriever
 
     @property
-    def intro_selector(self):
-        if self._intro_selector is None:
-            self._intro_selector = IntroSelector()
-        return self._intro_selector
+    def project_scanner(self):
+        if self._project_scanner is None:
+            self._project_scanner = ProjectDocScanner()
+        return self._project_scanner
 
-    def search_knowledge(self, query: str, category: str = None, top_n: int = 5) -> str:
+    # ----------------------------------------------------------
+    # 项目文档同步（上传/删除后让进程内检索器看到变更）
+    # ----------------------------------------------------------
+    def _iter_retrievers(self):
+        """
+        已创建的全部检索器实例。
+
+        注意：HybridRetriever 在构造时自己 new 了 VectorRetriever / BM25Retriever，
+        与本类三个 property 各建的实例是**不同对象**——all_dbs 快照因此存在多份。
+        检索主路径走 hybrid，只刷 tools.vector_retriever 会导致新文档照样检索不到，
+        故此处必须遍历全部实例。
+        """
+        if self._hybrid_retriever is not None:
+            yield self._hybrid_retriever.vector_retriever
+            yield self._hybrid_retriever.bm25_retriever
+        if self._vector_retriever is not None:
+            yield self._vector_retriever
+        if self._bm25_retriever is not None:
+            yield self._bm25_retriever
+
+    def sync_project_docs(self, user_id: Optional[int]) -> bool:
+        """
+        按文档快照懒刷新：该用户可见的项目文档有增/删/改时才动检索器，
+        避免每次请求全量重建。
+
+        在对话开始前调用一次即可（chat.py）。返回是否发生了刷新。
+
+        两个不能省的细节：
+        - 快照必须是 {doc_id: updated_at} 字典而不是 MAX(updated_at) 单值：
+          只比最大值时，删除**较旧**的那份文档不会改变版本号，判定"无变化"直接返回，
+          磁盘产物已被清掉但进程内缓存/向量快照仍持有旧内容 → 继续供给已删除文档。
+        - 首次同步也要刷（不能只记账）：检索器是进程级共享快照，它可能在
+          "别的用户先对话"时就已经构造完了，此后本用户的上传不会自动进去。
+        """
+        from src.database.utils.project_docs import list_visible_project_docs
+
+        docs = list_visible_project_docs(user_id)
+        cur = {d.doc_id: d.updated_at for d in docs}
+        prev = self._docs_snapshot.get(user_id)
+        if cur == prev:
+            return False
+
+        # 只动变化过的文档：未变的分块/索引留在缓存里，省掉整批 faiss 重读
+        changed = sorted(d for d in cur if prev is None or prev.get(d) != cur[d])
+        removed = sorted(set(prev or {}) - set(cur))
+        for retriever in self._iter_retrievers():
+            if hasattr(retriever, "refresh"):
+                retriever.refresh(changed, removed_ids=removed)
+            if hasattr(retriever, "invalidate"):
+                # 已删文档也要失效：它的分块还留在 BM25 缓存里
+                retriever.invalidate(changed + removed)
+
+        self._docs_snapshot[user_id] = cur
+        _log.info(
+            f"已同步用户 {user_id} 的项目文档快照: 刷新 {len(changed)} 份, "
+            f"移除 {len(removed)} 份"
+        )
+        return True
+
+    def search_knowledge(
+        self, query: str, category: str = None, top_n: int = 5,
+        doc_ids: List[str] = None,
+    ) -> str:
         """
         从知识库检索课程知识点（混合检索：BM25关键词 + 向量语义）
         参数:
             query: 查询文本
             category: 按类别过滤 (course/project/interview)
             top_n: 返回结果数
+            doc_ids: 限定只检索这些文档（多用户隔离的可见性白名单）
         返回:
             格式化的检索结果文本
         """
         try:
-            results = self.hybrid_retriever.retrieve(query, category=category, top_n=top_n)
+            results = self.hybrid_retriever.retrieve(
+                query, category=category, top_n=top_n, doc_ids=doc_ids)
         except Exception as e:
             # 混合检索失败（如embedding API异常）时降级为纯BM25
             _log.warning(f"混合检索失败: {e}, 降级为BM25检索")
             try:
-                results = self.bm25_retriever.retrieve(query, category=category, top_n=top_n)
+                results = self.bm25_retriever.retrieve(
+                    query, category=category, top_n=top_n, doc_ids=doc_ids)
             except Exception as e2:
                 _log.error(f"BM25检索也失败: {e2}")
                 return "知识库检索失败，暂无可用数据。"
@@ -152,16 +223,25 @@ class AgentTools:
             formatted.append(f"[{i}] 来源: {source}\n{text}")
         return "\n\n---\n\n".join(formatted)
 
-    def search_projects(self, query: str, top_n: int = 5) -> str:
+    def search_projects(self, query: str, top_n: int = 5, user_id: int = None) -> str:
         """
-        从知识库检索项目亮点素材：
+        从知识库检索项目素材：
         打了“简历优先”标签的项目按项目均分名额定向检索、轮询交错合并，
-        保证每个重点项目都进入上下文；剩余名额用全局项目检索补齐（去重）。
+        保证每个重点项目都进入上下文；剩余名额用可见范围内的项目检索补齐（去重）。
         无标签文档时退化为普通混合检索。
+
+        user_id 决定可见范围（公共素材 + 该用户私有），由 visible_project_doc_ids 换算成
+        doc_ids 白名单下传；检索层不做用户判断。
         """
-        tagged = self.list_tagged_project_ids()
+        visible = visible_project_doc_ids(user_id)
+        if not visible:
+            _log.info(f"用户 {user_id} 无可见项目文档，跳过项目检索")
+            return ""
+
+        tagged = self.list_tagged_project_ids(user_id=user_id)
         if not tagged:
-            return self.search_knowledge(query, category="project", top_n=top_n)
+            return self.search_knowledge(
+                query, category="project", top_n=top_n, doc_ids=visible)
 
         per_doc = max(1, top_n // len(tagged))
         per_project = []
@@ -199,14 +279,14 @@ class AgentTools:
                 break
             round_idx += 1
 
-        # 剩余名额用全局项目检索补齐（去重）；全局检索失败不影响已选的优先项目
+        # 剩余名额用可见范围内的项目检索补齐（去重）；失败不影响已选的优先项目
         if len(merged) < top_n:
             try:
                 global_results = self.hybrid_retriever.retrieve(
-                    query, category="project", top_n=top_n
+                    query, category="project", top_n=top_n, doc_ids=visible
                 )
             except Exception as e:
-                _log.warning(f"全局项目检索失败: {e}，仅使用优先项目结果")
+                _log.warning(f"可见项目检索失败: {e}，仅使用优先项目结果")
                 global_results = []
             for r in global_results:
                 if len(merged) >= top_n:
@@ -217,37 +297,38 @@ class AgentTools:
                     merged.append(r)
 
         if not merged:
-            return self.search_knowledge(query, category="project", top_n=top_n)
+            return self.search_knowledge(
+                query, category="project", top_n=top_n, doc_ids=visible)
         return self._format_results(merged)
 
-    def list_tagged_project_ids(self, tag: str = PRIORITY_TAG) -> List[Tuple[str, str]]:
-        """扫描项目分块文档，返回带指定标签的 [(doc_id, source), ...]"""
-        tagged = []
-        chunks_dir = self.config.paths.course_chunks_dir
-        for p in sorted(Path(chunks_dir).glob("project-*.json")):
-            try:
-                with open(p, "r", encoding="utf-8") as f:
-                    meta = json.load(f).get("metainfo", {})
-            except Exception:
-                continue
-            if meta.get("category") == "project" and tag in meta.get("tags", []):
-                tagged.append((meta.get("doc_id", ""), meta.get("source", "")))
-        return tagged
+    def list_tagged_project_ids(
+        self, tag: str = PRIORITY_TAG, user_id: int = None
+    ) -> List[Tuple[str, str]]:
+        """
+        返回该用户可见、且带指定标签的项目 [(doc_id, source), ...]。
+        查 project_docs 表而非扫描分块文件：既天然带用户过滤，也避免全目录 IO。
+        """
+        return visible_tagged_project_ids(user_id, tag)
 
     # ----------------------------------------------------------
     # 项目介绍文档挑选（简历生成的项目素材主路径）
     # ----------------------------------------------------------
 
-    def select_project_intros(
-        self, user_input: str, job_requirement: str = None, top_n: int = 5
+    def select_project_docs(
+        self, user_input: str, job_requirement: str = None, top_n: int = 5,
+        user_id: int = None,
     ) -> str:
         """
-        从 project_intros/ 挑选适合本次简历的项目介绍成品，拼接为素材文本。
+        挑选适合本次简历的项目素材，拼接为素材文本。
         规则：带“简历优先”标签的项目必选且排前；文档数≤INTRO_SMALL_COUNT时全选；
         否则由LLM按诉求/岗位从轻量目录中挑选（失败降级为标签+文件顺序兜底）。
-        无介绍文档时返回空串，调用方应降级用 search_projects 检索亮点分块。
+        引用范围：每份文档按「简历描述→技术栈→量化成果→亮点摘句」优先级拼素材并限长
+        （见 ProjectDocScanner.build_material），不再整篇引用也不只取一节。
+        可见范围：公共素材 + 该用户私有文档（见 ProjectDocScanner.scan_visible）。
+        无文档时返回空串，调用方应降级用 search_projects 检索项目分块。
         """
-        entries = self.intro_selector.scan(self.config.paths.project_intros_dir)
+        entries = self.project_scanner.scan_visible(
+            self.config.paths.projects_dir, user_id)
         if not entries:
             return ""
 
@@ -272,10 +353,10 @@ class AgentTools:
             return ""
 
         formatted = [
-            f"[{i}] 项目：{e['name']}\n{e['text']}"
+            f"[{i}] 项目：{e['name']}\n{e['material'] or e['resume_text']}"
             for i, e in enumerate(selected, 1)
         ]
-        _log.info(f"简历项目素材已选 {len(selected)} 个介绍文档: "
+        _log.info(f"简历项目素材已选 {len(selected)} 个项目文档: "
                   f"{[e['name'] for e in selected]}")
         return "\n\n---\n\n".join(formatted)
 
@@ -284,7 +365,7 @@ class AgentTools:
         top_n: int = 5,
     ) -> Optional[List[str]]:
         """LLM从介绍目录中挑选项目，返回项目名列表；失败返回None（调用方降级）"""
-        catalog = self.intro_selector.build_catalog(entries)
+        catalog = self.project_scanner.build_catalog(entries)
         job_section = f"\n## 目标岗位要求\n{job_requirement}" if job_requirement else ""
 
         try:

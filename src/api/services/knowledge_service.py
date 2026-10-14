@@ -141,20 +141,42 @@ class KnowledgeService:
             )
         _log.info("索引构建完成")
 
-    def ingest_highlights(self, force: bool = False, progress: Optional[ProgressFn] = None):
-        """项目亮点文档入库(category=project 分块)"""
-        from src.knowledge.highlight_ingestor import HighlightIngestor
+    def ingest_project_docs(self, force: bool = False, progress: Optional[ProgressFn] = None):
+        """
+        项目文档入库(category=project 分块)。
+        扫描 projects/ 根目录下的公共素材 + 各 u{user_id}/ 私有目录；
+        私有目录的文档 doc_id 会带 u{user_id} 段，与公共素材互不冲突。
+        """
+        from src.knowledge.project_doc import ProjectDocIngestor
 
         if progress:
-            progress("ingest-highlights", "项目亮点入库...", 70)
-        highlights_dir = self.config.paths.project_highlights_dir
-        if not highlights_dir.exists() or not list(highlights_dir.glob("*.md")):
-            _log.warning(f"项目亮点目录为空: {highlights_dir},请先放入项目亮点README(.md)")
+            progress("ingest-projects", "项目文档入库...", 70)
+        projects_dir = self.config.paths.projects_dir
+        if not projects_dir.exists():
+            _log.warning(f"项目文档目录不存在: {projects_dir}")
             return
-        _log.info(f"开始入库项目亮点文档: {highlights_dir}")
-        HighlightIngestor().ingest(
-            highlights_dir, self.config.paths.course_chunks_dir, force=force
-        )
+
+        ingestor = ProjectDocIngestor()
+        chunks_dir = self.config.paths.course_chunks_dir
+
+        def _ingest(directory, user_id, label):
+            if not directory.exists() or not list(directory.glob("*.md")):
+                _log.info(f"跳过（无文档）: {label}")
+                return
+            _log.info(f"开始入库项目文档: {label}")
+            ingestor.ingest(directory, chunks_dir, force=force, user_id=user_id)
+
+        _ingest(projects_dir, None, "公共素材")
+        for sub in sorted(projects_dir.glob("u*")):
+            if not sub.is_dir():
+                continue
+            try:
+                user_id = int(sub.name[1:])
+            except ValueError:
+                _log.warning(f"跳过非用户目录: {sub.name}")
+                continue
+            _ingest(sub, user_id, f"用户 {user_id}")
+
         _log.info("入库完成,请运行 build-indexes 建立索引")
 
     # ============================================================
@@ -183,8 +205,8 @@ class KnowledgeService:
         p("split-chunks", "[3/5] 文本分块...", 55)
         self.split_chunks(chunk_size=chunk_size, chunk_overlap=chunk_overlap, force=force)
 
-        p("ingest-highlights", "[4/5] 项目亮点入库...", 70)
-        self.ingest_highlights(force=force)
+        p("ingest-projects", "[4/5] 项目文档入库...", 70)
+        self.ingest_project_docs(force=force)
 
         p("build-indexes", "[5/5] 构建索引...", 90)
         self.build_indexes(bm25=True, vector=True, force=force, prune=prune)
@@ -217,6 +239,6 @@ class KnowledgeService:
             )
         if task == "build-indexes":
             return self.build_indexes(force=force, prune=prune, progress=progress)
-        if task == "ingest-highlights":
-            return self.ingest_highlights(force=force, progress=progress)
+        if task == "ingest-projects":
+            return self.ingest_project_docs(force=force, progress=progress)
         raise ValueError(f"未知任务类型: {task}")

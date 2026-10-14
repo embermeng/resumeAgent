@@ -421,29 +421,24 @@ class TestSearchProjectsPriority:
         return AgentTools(config=config)
 
     @patch("src.agent.tools.APIProcessor")
-    def test_list_tagged_project_ids(self, mock_api, tmp_path):
-        _write_project_chunk_doc(tmp_path, "project-aaa", "优先项目A", ["简历优先"])
-        _write_project_chunk_doc(tmp_path, "project-bbb", "普通项目B", [])
-        _write_project_chunk_doc(tmp_path, "project-ccc", "优先项目C", ["简历优先", "其他"])
-        # 非项目文档不干扰（不匹配project-前缀文件名）
-        (tmp_path / "abcdef1234567890.json").write_text("{}", encoding="utf-8")
-
+    def test_list_tagged_project_ids_delegates_to_visibility(self, mock_api, tmp_path):
+        """标签查询已改走 project_docs 表（带用户过滤），本方法只负责透传 user_id"""
         tools = self._make_tools(tmp_path)
-        tagged = tools.list_tagged_project_ids()
-        assert tagged == [("project-aaa", "优先项目A"), ("project-ccc", "优先项目C")]
+        with patch("src.agent.tools.visible_tagged_project_ids") as mock_vis:
+            mock_vis.return_value = [("project-aaa", "优先项目A")]
+            tagged = tools.list_tagged_project_ids(user_id=9)
+        assert tagged == [("project-aaa", "优先项目A")]
+        mock_vis.assert_called_once_with(9, "简历优先")
 
     @patch("src.agent.tools.APIProcessor")
     def test_priority_projects_all_present(self, mock_api, tmp_path):
-        """打了标签的每个项目都保证进入检索结果，剩余名额全局补齐"""
-        _write_project_chunk_doc(tmp_path, "project-p1", "优先一", ["简历优先"])
-        _write_project_chunk_doc(tmp_path, "project-p2", "优先二", ["简历优先"])
-        _write_project_chunk_doc(tmp_path, "project-x", "普通项目", [])
-
+        """打了标签的每个项目都保证进入检索结果，剩余名额在可见范围内补齐"""
         tools = self._make_tools(tmp_path)
         mock_hybrid = MagicMock()
 
         def fake_retrieve(query, category=None, top_n=5, doc_ids=None):
-            if doc_ids:
+            # 定向检索传单个 doc_id；可见范围补齐传整个白名单
+            if doc_ids and len(doc_ids) == 1:
                 d = doc_ids[0]
                 return [{"doc_id": d, "chunk_id": 0, "source": f"src-{d}", "text": f"定向内容{d}"}]
             return [
@@ -454,19 +449,23 @@ class TestSearchProjectsPriority:
         mock_hybrid.retrieve.side_effect = fake_retrieve
         tools._hybrid_retriever = mock_hybrid
 
-        result = tools.search_projects("生成简历", top_n=5)
-        # 两个优先项目都入选 + 全局补齐（去重后）
+        with patch("src.agent.tools.visible_project_doc_ids") as mock_visible, \
+             patch("src.agent.tools.visible_tagged_project_ids") as mock_tagged:
+            mock_visible.return_value = ["project-p1", "project-p2", "project-x"]
+            mock_tagged.return_value = [("project-p1", "优先一"), ("project-p2", "优先二")]
+            result = tools.search_projects("生成简历", top_n=5, user_id=9)
+
+        # 两个优先项目都入选 + 可见范围内补齐（去重后）
         assert "src-project-p1" in result
         assert "src-project-p2" in result
         assert "src-project-x" in result
         # 重复块只出现一次（去重生效）
         assert result.count("定向内容project-p1") == 1
+        mock_visible.assert_called_once_with(9)
 
     @patch("src.agent.tools.APIProcessor")
     def test_no_tags_fallback_to_plain_search(self, mock_api, tmp_path):
-        """无标签文档时退化为普通混合检索（不带doc_ids过滤）"""
-        _write_project_chunk_doc(tmp_path, "project-x", "普通项目", [])
-
+        """无标签文档时退化为普通混合检索，但仍受可见白名单约束"""
         tools = self._make_tools(tmp_path)
         mock_hybrid = MagicMock()
         mock_hybrid.retrieve.return_value = [
@@ -474,16 +473,33 @@ class TestSearchProjectsPriority:
         ]
         tools._hybrid_retriever = mock_hybrid
 
-        result = tools.search_projects("生成简历")
+        with patch("src.agent.tools.visible_project_doc_ids") as mock_visible, \
+             patch("src.agent.tools.visible_tagged_project_ids") as mock_tagged:
+            mock_visible.return_value = ["project-x"]
+            mock_tagged.return_value = []
+            result = tools.search_projects("生成简历", user_id=9)
+
         assert "src-x" in result
-        # 只调了一次检索，且未传doc_ids定向
+        # 只调了一次检索，且带上了该用户的可见白名单（不是不过滤）
         assert mock_hybrid.retrieve.call_count == 1
         _, kwargs = mock_hybrid.retrieve.call_args
-        assert kwargs.get("doc_ids") is None
+        assert kwargs.get("doc_ids") == ["project-x"]
+
+    @patch("src.agent.tools.APIProcessor")
+    def test_no_visible_docs_returns_empty(self, mock_api, tmp_path):
+        """该用户无任何可见项目文档时直接返回空，不发起检索"""
+        tools = self._make_tools(tmp_path)
+        mock_hybrid = MagicMock()
+        tools._hybrid_retriever = mock_hybrid
+
+        with patch("src.agent.tools.visible_project_doc_ids") as mock_visible:
+            mock_visible.return_value = []
+            assert tools.search_projects("生成简历", user_id=999) == ""
+        mock_hybrid.retrieve.assert_not_called()
 
 
 # ============================================================
-# select_project_intros 项目介绍挑选测试
+# select_project_docs 项目文档挑选测试
 # ============================================================
 
 def _write_intro(intros_dir, file_name, project_name, tagged=False, summary="一个项目"):
@@ -492,10 +508,11 @@ def _write_intro(intros_dir, file_name, project_name, tagged=False, summary="一
     (intros_dir / file_name).write_text(content, encoding="utf-8")
 
 
-class TestSelectProjectIntros:
+class TestSelectProjectDocs:
     def _make_tools(self, tmp_path):
         config = MagicMock()
-        config.paths.project_intros_dir = tmp_path
+        # scan_visible 在不传 user_id 时只扫公共目录（projects_dir 根）
+        config.paths.projects_dir = tmp_path
         config.llm.provider = "dashscope"
         config.llm.model = "test-model"
         return AgentTools(config=config)
@@ -503,7 +520,7 @@ class TestSelectProjectIntros:
     @patch("src.agent.tools.APIProcessor")
     def test_empty_dir_returns_empty(self, mock_api, tmp_path):
         tools = self._make_tools(tmp_path)
-        assert tools.select_project_intros("生成简历") == ""
+        assert tools.select_project_docs("生成简历") == ""
 
     @patch("src.agent.tools.APIProcessor")
     def test_small_count_use_all_without_llm(self, mock_api, tmp_path):
@@ -513,7 +530,7 @@ class TestSelectProjectIntros:
 
         tools = self._make_tools(tmp_path)
         tools._api = MagicMock()
-        result = tools.select_project_intros("生成简历")
+        result = tools.select_project_docs("生成简历")
         assert "重点项目" in result and "普通项目" in result
         # 标签项目排在前，且未触发LLM挑选
         assert result.index("重点项目") < result.index("普通项目")
@@ -534,7 +551,7 @@ class TestSelectProjectIntros:
         }
         tools._api = mock_llm
 
-        result = tools.select_project_intros("生成简历", top_n=5)
+        result = tools.select_project_docs("生成简历", top_n=5)
         assert "优先项目" in result  # 标签必选
         assert "项目3" in result and "项目1" in result
         assert "编造项目" not in result
@@ -555,7 +572,22 @@ class TestSelectProjectIntros:
         mock_llm.send_message.side_effect = Exception("API down")
         tools._api = mock_llm
 
-        result = tools.select_project_intros("生成简历", top_n=3)
+        result = tools.select_project_docs("生成简历", top_n=3)
         assert "优先项目" in result
         # 总量受top_n约束：共3个条目编号 [1]-[3]
         assert result.count("项目：") == 3
+
+    @patch("src.agent.tools.APIProcessor")
+    def test_material_sections_reach_prompt_text(self, mock_api, tmp_path):
+        """素材通道打通：技术栈/成果等章节要进 prompt，不能只给「简历描述」那百余字"""
+        (tmp_path / "a.md").write_text(
+            "# 项目甲\n\n## 简历描述\n负责检索链路。\n\n## 技术栈\nFastAPI、Celery\n\n"
+            "## 量化成果\n- 后端 409 个测试\n",
+            encoding="utf-8",
+        )
+
+        result = self._make_tools(tmp_path).select_project_docs("生成简历")
+        assert "【简历描述】\n负责检索链路。" in result
+        assert "【技术栈】\nFastAPI、Celery" in result
+        assert "【量化成果】\n- 后端 409 个测试" in result
+        assert result.index("【简历描述】") < result.index("【技术栈】")

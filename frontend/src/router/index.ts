@@ -21,7 +21,7 @@ const router = createRouter({
       path: '/admin',
       name: 'admin',
       component: () => import('@/views/AdminView.vue'),
-      meta: { title: '知识库管理' },
+      meta: { title: '知识库管理', adminOnly: true },
     },
   ],
 })
@@ -30,7 +30,8 @@ const router = createRouter({
  * 全局前置守卫:
  * - 首次导航先做一次静默续期(initialize:用 refresh cookie 换 access token);
  * - 公开页(登录)已登录则回主页,避免登录后仍停在登录页;
- * - 受保护页未登录 → 跳登录并带上 redirect,登录成功后回到原目标。
+ * - 受保护页未登录 → 跳登录并带上 redirect,登录成功后回到原目标;
+ * - adminOnly 页非管理员 → 回对话页(后端对管理端接口同样校验,这里只是入口保护)。
  */
 router.beforeEach(async (to) => {
   const auth = useAuthStore()
@@ -40,8 +41,11 @@ router.beforeEach(async (to) => {
     if (auth.isAuthenticated && to.name === 'login') return { name: 'chat' }
     return true
   }
-  if (auth.isAuthenticated) return true
-  return { name: 'login', query: { redirect: to.fullPath } }
+  if (!auth.isAuthenticated) {
+    return { name: 'login', query: { redirect: to.fullPath } }
+  }
+  if (to.meta.adminOnly && !auth.isSuperuser) return { name: 'chat' }
+  return true
 })
 
 export default router

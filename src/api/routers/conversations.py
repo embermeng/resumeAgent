@@ -4,6 +4,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from src.auth.security import CurrentUser
 from src.api.schemas_api import (
@@ -81,3 +82,26 @@ async def conversation_messages(
         ) for item in msg_list
     ]
     return ConversationMessages(messages=message_list, conversation_id=conversation_id)
+
+
+@router.delete("/conversations/{conversation_id}", status_code=204)
+async def delete_conversation(
+    conversation_id: int,
+    current_user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_async_session)],
+):
+    """
+    删除会话及其全部消息。越权(他人会话)与不存在同判据 404,不泄露存在性。
+    必须 session.delete(对象) 而非裸 DELETE 语句:messages 外键没有 DB 级 ondelete,
+    子行靠 ORM 的 cascade="all, delete-orphan" 删除;
+    查询时 selectinload 预取子行,否则 flush 阶段才惰性加载集合。
+    """
+    conv = (await db.execute(
+        select(models.Conversation)
+        .options(selectinload(models.Conversation.messages))
+        .where(models.Conversation.id == conversation_id)
+    )).scalars().first()
+    if conv is None or conv.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="conversation not found")
+    await db.delete(conv)
+    await db.commit()

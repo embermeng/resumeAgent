@@ -27,6 +27,11 @@ async function onLogout() {
   <!-- 公开页(登录):不套导航壳 -->
   <router-view v-if="isPublic" />
 
+  <!-- 初始导航(守卫 initialize 静默续期)完成前不渲染壳:
+       AppSidebar 不在 router-view 内、不受守卫保护,过早挂载会在 access token
+       就绪前抢发 /conversations 等请求(401);未登录时守卫会跳登录页 -->
+  <div v-else-if="!auth.initialized" class="app-boot">加载中…</div>
+
   <div v-else class="app-shell">
     <header class="app-topbar">
       <div class="brand">
@@ -56,6 +61,14 @@ async function onLogout() {
 </template>
 
 <style scoped>
+.app-boot {
+  height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #94a3b8;
+  font-size: 14px;
+}
 .app-shell {
   display: flex;
   flex-direction: column;
