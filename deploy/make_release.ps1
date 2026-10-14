@@ -46,13 +46,22 @@ $items = @(
     "frontend/src", "frontend/env.d.ts", "frontend/vite.config.ts",
     "frontend/tsconfig.json", "frontend/tsconfig.node.json",
     "data/databases", "data/processed",
-    "data/knowledge_base/project_intros", "data/knowledge_base/project_highlights"
+    # 项目素材已按用户隔离：data/knowledge_base/projects/<user_id>/{project_intros,project_highlights}/
+    "data/knowledge_base/projects"
 )
 
 if ($IncludeFrontendDist -and (Test-Path (Join-Path $root "frontend/dist/index.html")) -eq $false) {
     Write-Host "[警告] 本地没有 frontend/dist，请先执行: cd frontend; npm run build" -ForegroundColor Yellow
 }
 if ($IncludeFrontendDist) { $items += "frontend/dist" }
+
+# 过滤不存在的条目，避免 tar 因为个别路径缺失整包失败（bsdtar 遇缺失即非零退出）
+$missing = @($items | Where-Object { -not (Test-Path (Join-Path $root $_)) })
+if ($missing.Count -gt 0) {
+    Write-Host ("[警告] 以下 {0} 个路径不存在，已跳过：{1}" -f $missing.Count, ($missing -join ", ")) -ForegroundColor Yellow
+    $items = @($items | Where-Object { Test-Path (Join-Path $root $_) })
+}
+if ($items.Count -eq 0) { throw "没有可打包的条目" }
 
 Write-Host "[打包] 生成 $out" -ForegroundColor Green
 Push-Location $root
