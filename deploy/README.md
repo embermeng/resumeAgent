@@ -79,16 +79,16 @@ cd /opt/ResumeAgent && tar -xzf /home/ubuntu/resume-agent.tgz
 mv /home/ubuntu/.env /opt/ResumeAgent/.env && chmod 600 .env
 
 # 方案 A：Docker（需能拉取 Docker Hub 镜像）
-sudo ENABLE_AUTH=1 bash deploy/setup_server.sh
+sudo bash deploy/setup_server.sh
 
 # 方案 B：免 Docker（Docker Hub 拉不动时用，只依赖 apt/pip 国内源）
-sudo ENABLE_AUTH=1 bash deploy/setup_server_nodocker.sh
+sudo bash deploy/setup_server_nodocker.sh
 ```
 
 脚本会自动完成：校验 `.env` → 装依赖 → **初始化 `runtime-data`**（Docker 模式）→ 构建 → **`alembic upgrade head` 建表** → 启动 → 配 Nginx。
 数据库需你自备（见下一节）。
 
-`ENABLE_AUTH=1` 会让你设一个访问密码（账号 `admin`）。项目自带**多用户 JWT 注册登录**，但仍建议再加这层口令，避免陌生人随意注册。
+注册默认关闭（`.env` 的 `ALLOW_REGISTER=false`，注册接口直接 403），陌生人无法注册烧额度。想再叠加整站口令才用 `ENABLE_AUTH=1` 跑脚本（账号 `admin`）。
 
 **域名已内置为默认值**：两个脚本的 `DOMAIN` 默认就是 `resumeagent.icu`，会写进 Nginx `server_name` 并自动跑 certbot 申请 HTTPS 证书。
 
@@ -282,7 +282,7 @@ timeout 120 sudo docker pull node:20-alpine
 - `.env` **永不进包、永不进镜像、永不进 Git**（`.gitignore` / `.dockerignore` 已排除）
 - 不要把 API Key、服务器密码发给任何人（包括贴到聊天里）
 - `SECRET_KEY` 决定 JWT 签名，**泄露等于可伪造登录**；改它会使已签发令牌失效，改完跑 `deploy/update.sh backend`
-- 项目自带多用户注册登录，任何人都能注册——公网建议保持 `auth_basic` 开启；若不想让人触发知识库重建，可在 Nginx 加：
+- 注册默认关闭（`.env` 的 `ALLOW_REGISTER=false`），开放注册时才显式置 `true`；若不想让已登录用户触发知识库重建，可在 Nginx 加：
   ```nginx
   location = /admin { return 404; }
   location = /api/knowledge/build { return 403; }

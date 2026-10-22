@@ -6,7 +6,7 @@
 #
 # 用法（代码已放到 /opt/ResumeAgent 后执行）：
 #   sudo bash deploy/setup_server_nodocker.sh                    # 用默认域名 resumeagent.icu + HTTPS
-#   sudo ENABLE_AUTH=1 bash deploy/setup_server_nodocker.sh      # 加访问口令（推荐）
+#   sudo ENABLE_AUTH=1 bash deploy/setup_server_nodocker.sh      # 可选：加整站访问口令（默认关闭）
 #   sudo DOMAIN= bash deploy/setup_server_nodocker.sh            # 显式留空 = 只用 IP，不申请证书
 #
 # 可选环境变量：

@@ -382,7 +382,7 @@ event: error    data: {"message":"..."}
 
 - 请求体:`UserCreate`(username 1~50、email EmailStr、password ≥8,不满足 → `422`)。
 - 响应 `201`:`UserPrivate`(id/username/email)。
-- 错误:用户名已存在 → `409` `{"detail": "Username already exists"}`;邮箱已注册 → `409` `{"detail": "Email already registered"}`(均大小写不敏感查重)。
+- 错误:注册开关关闭(`.env` 的 `ALLOW_REGISTER=false`,即默认状态)→ `403` `{"detail": "Register is not allowed"}`;用户名已存在 → `409` `{"detail": "Username already exists"}`;邮箱已注册 → `409` `{"detail": "Email already registered"}`(均大小写不敏感查重)。
 - 行为:email 小写归一后入库;密码经 argon2id(pwdlib `PasswordHash.recommended()`)哈希后落 `users.password_hash` 列;**注册不自动登录**,前端注册成功后引导调 login。
 
 ### 4.14 POST /api/auth/login

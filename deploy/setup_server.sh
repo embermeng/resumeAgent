@@ -4,7 +4,7 @@
 #
 # 用法（在服务器上，代码已放到 /opt/ResumeAgent 后执行）：
 #   sudo bash deploy/setup_server.sh                    # 用默认域名 resumeagent.icu + HTTPS
-#   sudo ENABLE_AUTH=1 bash deploy/setup_server.sh      # 再加一层访问口令（推荐）
+#   sudo ENABLE_AUTH=1 bash deploy/setup_server.sh      # 可选：加整站访问口令（默认关闭）
 #   sudo DOMAIN= bash deploy/setup_server.sh            # 显式留空 = 只用 IP 访问，不申请证书
 #   sudo DOMAIN=resume.example.com bash deploy/setup_server.sh   # 换别的域名
 #
