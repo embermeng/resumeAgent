@@ -64,7 +64,7 @@ ALLOW_REGISTER=false               # 注册开关，代码默认 false；开放�
 COOKIE_SECURE=true                 # 走 https://resumeagent.icu 时打开；用 IP+HTTP 访问时必须留 false
 ```
 
-> 注册即等于可上传项目文档、消耗 embedding 额度。生产默认关闭，需要开放时显式改 `true` 并重跑 `deploy/update.sh backend`。
+> 注册即等于可上传项目文档、消耗 embedding 额度。生产默认关闭，需要开放时显式改 `true`，再按[四、运维命令 →「改 `.env` 后如何让配置生效」](#改-env-后如何让配置生效易踩坑)重建容器（Docker 模式 `docker compose restart` **不生效**）。
 
 ### 2. 控制台放行端口
 
@@ -206,16 +206,62 @@ sudo mv /home/ubuntu/我的项目.md /opt/ResumeAgent/data/knowledge_base/projec
 | 操作 | systemd 模式 | Docker 模式 |
 |---|---|---|
 | 看日志（API） | `journalctl -u resume-agent -f` | `docker compose logs -f --tail 100 resume-agent` |
-| 看日志（worker） | `journalctl -u resume-agent-worker-resume -f` | `docker compose logs -f worker-resume worker-knowledge` |
-| 重启 | `systemctl restart resume-agent resume-agent-worker-resume resume-agent-worker-knowledge` | `docker compose restart` |
-| 停止 | `systemctl stop resume-agent resume-agent-worker-resume resume-agent-worker-knowledge` | `docker compose down` |
+| 看日志（worker） | `journalctl -u resume-agent-worker-resume -f` | `docker compose logs -f worker-resume worker-knowledge worker-project` |
+| 重启（**没改** `.env`） | `systemctl restart resume-agent resume-agent-worker-{resume,knowledge,project}` | `docker compose restart` |
+| 重启（**改过** `.env`） | 同上（`EnvironmentFile` 每次启动重读） | `docker compose up -d` ← **必须**，`restart` 不生效，见下节 |
+| 停止 | `systemctl stop resume-agent resume-agent-worker-{resume,knowledge,project}` | `docker compose down` |
 | 状态 | `systemctl status resume-agent` | `docker compose ps` |
 | 健康检查 | `curl http://127.0.0.1:8000/api/health` | 同左 |
 | Redis | `redis-cli ping`（应回 `PONG`） | `docker compose exec redis redis-cli ping` |
 
-改密钥/改 `DATABASE_URL`：`sudo vi /opt/ResumeAgent/.env` → `sudo bash deploy/update.sh backend`
+### 改 `.env` 后如何让配置生效（易踩坑）
 
-备份/回滚索引（Docker 模式请备份 `runtime-data`，它才是挂载生效的数据）：
+配置被**两层冻结**，少解一层都不生效：
+
+1. **代码层**：`src/config.py` 的配置项是 dataclass 字段默认值，在模块 **import 时**就调 `os.getenv` 求值完毕；各 router 又在 import 时 `settings = get_config()` 持有单例。值在进程启动那一刻定死，只能重启进程。（`config.py` 的 `reset_config()` 是给测试用的，救不了这个场景——默认值早已求值完。）
+2. **容器层**：compose 用 `env_file: .env` 注入，内容在**容器创建时**写进容器配置，创建后不可变。`docker compose restart` 只是重启同一容器的进程，环境变量仍是旧的。
+
+**Docker 模式**：
+
+```bash
+cd /opt/ResumeAgent
+sudo vi .env                                              # 例：ALLOW_REGISTER=true
+sudo docker compose up -d                                 # 不需要 --build
+sudo docker compose exec resume-agent printenv ALLOW_REGISTER   # 必须验证
+```
+
+`.env` 不是 build arg，`up -d` 就够，**别加 `--build`**（白跑十几分钟镜像构建）。
+
+最后那条 `printenv` 别省：部分 Compose 版本对 `env_file` 内容变更的 recreate 判定不可靠。回显还是旧值就单独强制重建：
+
+```bash
+sudo docker compose up -d --force-recreate resume-agent
+```
+
+**systemd 模式**：单元里是 `EnvironmentFile=/opt/ResumeAgent/.env`，每次启动重读，`restart` 即生效：
+
+```bash
+sudo systemctl restart resume-agent resume-agent-worker-resume resume-agent-worker-knowledge resume-agent-worker-project
+```
+
+**要不要连 worker 一起重建**：只有 API 读的变量（`ALLOW_REGISTER`、`COOKIE_SECURE`）重建 `resume-agent` 一个就够；worker 也读的（`DATABASE_URL`、各家 `*_API_KEY`、`MINERU_*`、`RESUME_MATERIAL_MAX_TOKENS`）必须一起，否则 API 与 worker 行为不一致。`up -d` 本来就只重建配置有变化的容器，代价很小，**建议一律全量**。
+
+**四个不走 `.env` 的变量**：`REDIS_URL`、`SERVE_STATIC`、`CORS_ORIGINS`、`TZ` 由 compose 的 `environment` 显式注入，优先级**高于** `env_file`。改 `.env` 里这些值在 Docker 模式下完全无效，要改得动 `docker-compose.yml`。
+
+**操作风险**：
+
+- 重建 `resume-agent` 会**掐断进行中的 SSE 对话流**。Redis 容器配置没变不会被重建，重放缓冲还在，前端重连（3 次、400/800/1200ms 退避）多数能续上；超出缓冲 TTL 或次数用尽就真断了。
+- 重建 `worker-knowledge` 时若 `build-all` 正在跑，任务会被**中途杀死**，`build_tasks` 那行永远卡在 `running`（没有心跳超时回收）。动手前先确认没有构建任务：
+  ```bash
+  curl 'http://127.0.0.1:8000/api/knowledge/tasks?page=1&page_size=5'
+  ```
+- 改 `SECRET_KEY` 会使所有已签发的 access/refresh token 失效，**全体用户被踢下线**。
+
+**什么时候还是得跑 `update.sh backend`**：同时改了 Python 代码或依赖清单时。单纯改 `.env` 用上面的轻量路径即可，不必重建镜像、不必重装依赖。
+
+### 备份/回滚索引
+
+Docker 模式请备份 `runtime-data`，它才是挂载生效的数据：
 
 ```bash
 sudo cp -r /opt/ResumeAgent/runtime-data /opt/ResumeAgent/runtime-data.bak   # Docker 模式
@@ -281,11 +327,11 @@ timeout 120 sudo docker pull node:20-alpine
 
 - `.env` **永不进包、永不进镜像、永不进 Git**（`.gitignore` / `.dockerignore` 已排除）
 - 不要把 API Key、服务器密码发给任何人（包括贴到聊天里）
-- `SECRET_KEY` 决定 JWT 签名，**泄露等于可伪造登录**；改它会使已签发令牌失效，改完跑 `deploy/update.sh backend`
+- `SECRET_KEY` 决定 JWT 签名，**泄露等于可伪造登录**；改它会使已签发令牌全部失效（所有用户被踢下线），改完按[「改 `.env` 后如何让配置生效」](#改-env-后如何让配置生效易踩坑)重建 API **与全部 worker**
 - 注册默认关闭（`.env` 的 `ALLOW_REGISTER=false`），开放注册时才显式置 `true`；若不想让已登录用户触发知识库重建，可在 Nginx 加：
   ```nginx
   location = /admin { return 404; }
   location = /api/knowledge/build { return 403; }
   ```
-- PostgreSQL / Redis 只对内网开放（不要映射 `5432` / `6379` 到公网）
+- PostgreSQL / Redis 只对内网开放 （不要映射 `5432` / `6379` 到公网）
 - API 单进程 `--workers 1`，并发上限约 5~10 人；重活由两个 celery worker 承担（resume 并发 2 / knowledge 串行）
